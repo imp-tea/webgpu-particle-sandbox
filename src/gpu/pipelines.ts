@@ -58,6 +58,11 @@ export function createPipelines(
         binding: 3,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "uniform" }
+      },
+      {
+        binding: 4,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" }
       }
     ]
   });
@@ -79,6 +84,11 @@ export function createPipelines(
         binding: 2,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "uniform" }
+      },
+      {
+        binding: 3,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" }
       }
     ]
   });
@@ -178,6 +188,11 @@ export function createPipelines(
         binding: 4,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "uniform" }
+      },
+      {
+        binding: 5,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" }
       }
     ]
   });
@@ -413,13 +428,30 @@ export function createPipelines(
       { binding: 0, resource: { buffer: gridBuffers.cellCounts } },
       { binding: 1, resource: { buffer: gridBuffers.cellStarts } },
       { binding: 2, resource: { buffer: gridBuffers.cellWriteOffsets } },
-      { binding: 3, resource: { buffer: uniformBuffer } }
+      { binding: 3, resource: { buffer: uniformBuffer } },
+      { binding: 4, resource: { buffer: gridBuffers.debugCounters } }
     ]
   });
 
   const countGridBindGroups: [GPUBindGroup, GPUBindGroup] = [
-    createCountGridBindGroup(device, countGridBindGroupLayout, particleBuffers[0], gridBuffers.cellCounts, uniformBuffer, "A"),
-    createCountGridBindGroup(device, countGridBindGroupLayout, particleBuffers[1], gridBuffers.cellCounts, uniformBuffer, "B")
+    createCountGridBindGroup(
+      device,
+      countGridBindGroupLayout,
+      particleBuffers[0],
+      gridBuffers.cellCounts,
+      uniformBuffer,
+      gridBuffers.debugCounters,
+      "A"
+    ),
+    createCountGridBindGroup(
+      device,
+      countGridBindGroupLayout,
+      particleBuffers[1],
+      gridBuffers.cellCounts,
+      uniformBuffer,
+      gridBuffers.debugCounters,
+      "B"
+    )
   ];
 
   const scanCellStartsBindGroup = device.createBindGroup({
@@ -462,6 +494,7 @@ export function createPipelines(
       gridBuffers.cellWriteOffsets,
       gridBuffers.pairValues,
       uniformBuffer,
+      gridBuffers.debugCounters,
       "A"
     ),
     createScatterGridBindGroup(
@@ -472,6 +505,7 @@ export function createPipelines(
       gridBuffers.cellWriteOffsets,
       gridBuffers.pairValues,
       uniformBuffer,
+      gridBuffers.debugCounters,
       "B"
     )
   ];
@@ -534,6 +568,7 @@ function createCountGridBindGroup(
   particles: GPUBuffer,
   cellCounts: GPUBuffer,
   uniformBuffer: GPUBuffer,
+  debugCounters: GPUBuffer,
   label: string
 ) {
   return device.createBindGroup({
@@ -542,7 +577,8 @@ function createCountGridBindGroup(
     entries: [
       { binding: 0, resource: { buffer: particles } },
       { binding: 1, resource: { buffer: cellCounts } },
-      { binding: 2, resource: { buffer: uniformBuffer } }
+      { binding: 2, resource: { buffer: uniformBuffer } },
+      { binding: 3, resource: { buffer: debugCounters } }
     ]
   });
 }
@@ -555,6 +591,7 @@ function createScatterGridBindGroup(
   cellWriteOffsets: GPUBuffer,
   pairValues: GPUBuffer,
   uniformBuffer: GPUBuffer,
+  debugCounters: GPUBuffer,
   label: string
 ) {
   return device.createBindGroup({
@@ -565,7 +602,8 @@ function createScatterGridBindGroup(
       { binding: 1, resource: { buffer: cellStarts } },
       { binding: 2, resource: { buffer: cellWriteOffsets } },
       { binding: 3, resource: { buffer: pairValues } },
-      { binding: 4, resource: { buffer: uniformBuffer } }
+      { binding: 4, resource: { buffer: uniformBuffer } },
+      { binding: 5, resource: { buffer: debugCounters } }
     ]
   });
 }

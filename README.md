@@ -25,8 +25,9 @@ npm run build
 - Right mouse drag or Alt-drag repels particles.
 - Pause toggles GPU simulation dispatch.
 - Reset rewrites the initial particle state into both GPU ping-pong buffers.
-- Sliders adjust particle count, gravity, damping, mouse force, short-range repulsion, and cohesion.
+- Sliders adjust particle count, gravity, damping, simulation substeps, bond iterations, elasticity, viscosity, mouse force, short-range repulsion, and cohesion.
 - The material preset selector rewrites the GPU material buffer live: Mixed, Granular, Liquid, and Separated.
+- The debug line reports substeps, GPU-counted max cell occupancy, scatter overflow, and CPU-side frame/simulation timing.
 
 ## File Structure
 
@@ -43,7 +44,7 @@ src/shaders/scanCellStarts.wgsl Prefix-scans cell counts within fixed-size block
 src/shaders/scanGroupOffsets.wgsl Prefix-scans block totals
 src/shaders/addCellOffsets.wgsl Adds scanned block offsets to each cell start
 src/shaders/scatterGrid.wgsl Writes particle ids into contiguous per-cell ranges
-src/shaders/simulate.wgsl    GPU integration, range-based neighbor forces, wall collisions
+src/shaders/simulate.wgsl    GPU integration, range-based neighbor forces, soft-body bonds, wall collisions
 src/shaders/render.wgsl      Instanced particle quad rendering from storage buffers
 ```
 
@@ -69,7 +70,7 @@ color:       vec4<f32>
 dynamics:    vec4<f32>  repulsion scale, cohesion scale, same-material affinity, cross-material affinity
 ```
 
-The simulation now uses seven compute phases per active frame:
+The simulation runs the seven compute phases below once per active substep:
 
 ```text
 clearGrid         Clear active cell counts, starts, and scatter offsets.
@@ -81,16 +82,20 @@ scatterGrid       Scatter particle ids into contiguous per-cell ranges.
 simulate          Sample the current cell and 8 neighbors, then integrate into the next buffer.
 ```
 
-The grid build uses a histogram/prefix-bin path instead of sorting `(cellId, particleId)` pairs every frame. The simulation pass applies gravity, damping, pointer attraction or repulsion, wall collisions, velocity clamping, short-range repulsion, and a material-aware cohesion band driven by the material parameter buffer. Rendering draws six vertices per particle as instanced quads and shades circular sprites from the current GPU particle buffer and material colors.
+The grid build uses a histogram/prefix-bin path instead of sorting `(cellId, particleId)` pairs every frame. Each substep rebuilds the grid from the latest ping-pong particle buffer, then integrates with `deltaTime / substeps`; this is the first stability layer for dense soft-body-like clusters. The simulation pass applies gravity, damping, pointer attraction or repulsion, wall collisions, velocity clamping, short-range repulsion, a material-aware cohesion band, relative-velocity viscosity, and local rest-neighborhood lattice constraints driven by the reset layout. Rendering draws six vertices per particle as instanced quads and shades circular sprites from the current GPU particle buffer and material colors.
 
 ## Limitations
 
 - Cohesion intentionally makes particles form blobs. Keep it near `0` for granular behavior and raise it for fluid/blob behavior.
+- Bond iterations repeat the local constraint solve inside each substep. Raise this for stiffer, less fabric-like bonds.
+- Elasticity preserves each reset lattice's local shape with horizontal, vertical, diagonal, and weaker two-cell axial constraints. Set it to `0` to return to pure particle-fluid behavior.
+- Viscosity damps relative motion between close particles and bonded lattice neighbors. Higher values make soft bodies less jiggly but more sluggish.
 - The prefix scan assumes the configured grid stays within 256 scan groups. The current 256x144 grid uses 144 groups.
 - The grid particle id buffer is sized for 65,536 lanes, which covers the current 50,000-particle target.
 - Material parameters are GPU buffer data and can be switched live with the material preset selector.
 - Particle data is CPU-generated only on reset. Normal simulation and rendering stay GPU-side.
-- The prototype targets clarity first. It does not yet expose multiple simulation substeps.
+- Higher substep counts improve dense-contact stability but multiply the grid and simulation compute work.
+- The debug timing readout is CPU-side encode/submit timing, not GPU timestamp-query timing.
 
 ## Spatial Hashing Status
 
@@ -104,10 +109,16 @@ Implemented:
 6. Add short-range repulsion and a tunable Lennard-Jones-like cohesion band.
 7. Read per-material color and dynamics parameters from a GPU storage buffer.
 8. Switch material parameter presets live from the UI.
+9. Add optional substeps for stability under high force and high density.
+10. Add GPU debug counters for max cell occupancy and scatter overflow.
+11. Add reset-layout soft-body constraints for local shape preservation.
+12. Add relative-velocity viscosity for calmer high-pressure contacts.
+13. Add bond solver iterations and weaker two-cell axial constraints for stiffer local shape retention.
 
 Next:
 
-1. Add optional substeps for stability under high force and high density.
-2. Add GPU debug counters for max cell occupancy and timing.
+1. Add explicit multi-body spawning and body ids so separate particle chunks can act as independent soft solids.
+2. Add density limiting or position relaxation for calmer high-pressure contacts.
+3. Add optional GPU timestamp queries where supported.
 
 The fixed-cell overflow issue is removed, the dispatch-heavy bitonic sort has been replaced by a histogram/prefix-bin grid build, and material behavior now comes from a shared GPU parameter table.

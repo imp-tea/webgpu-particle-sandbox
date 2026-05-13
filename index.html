@@ -13,6 +13,7 @@
           <div>
             <h1>Particle Sandbox</h1>
             <p id="gpu-status">Initializing WebGPU...</p>
+            <p id="debug-stats">substeps 2x | cell max -- | encode --ms | frame --ms</p>
           </div>
           <div class="button-row">
             <button id="pause-button" type="button">Pause</button>
@@ -33,6 +34,26 @@
         <label>
           <span>Damping <output id="damping-output">0.25</output></span>
           <input id="damping" type="range" min="0" max="2" step="0.01" value="0.25" />
+        </label>
+
+        <label>
+          <span>Substeps <output id="substeps-output">2</output></span>
+          <input id="substeps" type="range" min="1" max="8" step="1" value="2" />
+        </label>
+
+        <label>
+          <span>Bond iterations <output id="bond-iterations-output">4</output></span>
+          <input id="bond-iterations" type="range" min="1" max="8" step="1" value="4" />
+        </label>
+
+        <label>
+          <span>Elasticity <output id="soft-body-strength-output">2600</output></span>
+          <input id="soft-body-strength" type="range" min="0" max="6000" step="50" value="2600" />
+        </label>
+
+        <label>
+          <span>Viscosity <output id="viscosity-output">4.0</output></span>
+          <input id="viscosity" type="range" min="0" max="16" step="0.5" value="4" />
         </label>
 
         <label>

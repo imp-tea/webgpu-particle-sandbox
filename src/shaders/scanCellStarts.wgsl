@@ -15,9 +15,12 @@ struct SimParams {
   gridRows: u32,
   gridParticleCapacity: u32,
   cohesion: f32,
-  padding0: f32,
-  padding1: f32,
-  padding2: f32,
+  softBodyStrength: f32,
+  viscosity: f32,
+  restColumns: u32,
+  restRows: u32,
+  bondIterations: u32,
+  restCellSize: vec2<f32>,
 };
 
 @group(0) @binding(0) var<storage, read_write> cellCounts: array<atomic<u32>>;

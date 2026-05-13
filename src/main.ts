@@ -8,21 +8,25 @@ import {
   getGridDimensions,
   type MaterialPreset,
   writeMaterialParams,
-  writeSimParams
+  writeSimParams,
+  type GridBuffers,
+  type ParticleBuffers
 } from "./gpu/buffers";
 import { initWebGPU } from "./gpu/initWebGPU";
-import { createPipelines } from "./gpu/pipelines";
+import { createPipelines, type Pipelines } from "./gpu/pipelines";
 import { PointerInput } from "./input";
 
 const canvasElement = document.querySelector<HTMLCanvasElement>("#sim-canvas");
 const statusElement = document.querySelector<HTMLElement>("#gpu-status");
+const debugElement = document.querySelector<HTMLElement>("#debug-stats");
 
-if (!canvasElement || !statusElement) {
+if (!canvasElement || !statusElement || !debugElement) {
   throw new Error("Missing required DOM nodes.");
 }
 
 const canvas: HTMLCanvasElement = canvasElement;
 const statusLabel: HTMLElement = statusElement;
+const debugLabel: HTMLElement = debugElement;
 
 void start();
 
@@ -59,6 +63,13 @@ async function start() {
 
     let paused = false;
     let lastTime = performance.now();
+    let latestMaxCellOccupancy = 0;
+    let latestGridOverflow = 0;
+    let debugReadbackPending = false;
+    let lastDebugReadback = 0;
+    let lastDebugUiRefresh = 0;
+    let smoothedFrameMs = 0;
+    let smoothedSimulationEncodeMs = 0;
 
     ui.onPauseToggle = () => {
       paused = !paused;
@@ -67,68 +78,50 @@ async function start() {
     };
 
     const frame = (now: number) => {
+      const frameStart = performance.now();
       const elapsed = Math.min((now - lastTime) / 1000, 1 / 30);
       lastTime = now;
       gpu.resize();
       const size = gpu.getWorldSize();
       const deltaTime = paused ? 0 : elapsed;
-
-      writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, deltaTime);
-
-      const encoder = gpu.device.createCommandEncoder({ label: "Frame command encoder" });
+      let simulationEncodeMs = 0;
 
       if (!paused) {
+        const substeps = clampSubsteps(settings.substeps);
+        const subDeltaTime = deltaTime / substeps;
         const activeGrid = getGridDimensions(size.width, size.height);
         const activeCellCount = activeGrid.columns * activeGrid.rows;
-
-        const clearGridPass = encoder.beginComputePass({ label: "Clear spatial grid pass" });
-        clearGridPass.setPipeline(pipelines.clearGridPipeline);
-        clearGridPass.setBindGroup(0, pipelines.clearGridBindGroup);
-        clearGridPass.dispatchWorkgroups(Math.ceil(activeCellCount / WORKGROUP_SIZE));
-        clearGridPass.end();
-
-        const countGridPass = encoder.beginComputePass({ label: "Count spatial grid pass" });
-        countGridPass.setPipeline(pipelines.countGridPipeline);
-        countGridPass.setBindGroup(0, pipelines.countGridBindGroups[particles.activeIndex]);
-        countGridPass.dispatchWorkgroups(Math.ceil(settings.particleCount / WORKGROUP_SIZE));
-        countGridPass.end();
-
         const cellScanGroups = Math.ceil(activeCellCount / grid.scanBlockSize);
 
-        const scanCellStartsPass = encoder.beginComputePass({ label: "Scan cell starts pass" });
-        scanCellStartsPass.setPipeline(pipelines.scanCellStartsPipeline);
-        scanCellStartsPass.setBindGroup(0, pipelines.scanCellStartsBindGroup);
-        scanCellStartsPass.dispatchWorkgroups(cellScanGroups);
-        scanCellStartsPass.end();
+        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, subDeltaTime, particles);
 
-        const scanGroupOffsetsPass = encoder.beginComputePass({ label: "Scan grid group offsets pass" });
-        scanGroupOffsetsPass.setPipeline(pipelines.scanGroupOffsetsPipeline);
-        scanGroupOffsetsPass.setBindGroup(0, pipelines.scanGroupOffsetsBindGroup);
-        scanGroupOffsetsPass.dispatchWorkgroups(1);
-        scanGroupOffsetsPass.end();
-
-        const addCellOffsetsPass = encoder.beginComputePass({ label: "Add cell offsets pass" });
-        addCellOffsetsPass.setPipeline(pipelines.addCellOffsetsPipeline);
-        addCellOffsetsPass.setBindGroup(0, pipelines.addCellOffsetsBindGroup);
-        addCellOffsetsPass.dispatchWorkgroups(Math.ceil(activeCellCount / WORKGROUP_SIZE));
-        addCellOffsetsPass.end();
-
-        const scatterGridPass = encoder.beginComputePass({ label: "Scatter spatial grid pass" });
-        scatterGridPass.setPipeline(pipelines.scatterGridPipeline);
-        scatterGridPass.setBindGroup(0, pipelines.scatterGridBindGroups[particles.activeIndex]);
-        scatterGridPass.dispatchWorkgroups(Math.ceil(settings.particleCount / WORKGROUP_SIZE));
-        scatterGridPass.end();
-
-        const simulatePass = encoder.beginComputePass({ label: "Particle simulation pass" });
-        simulatePass.setPipeline(pipelines.simulatePipeline);
-        simulatePass.setBindGroup(0, pipelines.simulateBindGroups[particles.activeIndex]);
-        simulatePass.dispatchWorkgroups(Math.ceil(settings.particleCount / WORKGROUP_SIZE));
-        simulatePass.end();
-
-        particles.swap();
+        const simulationStart = performance.now();
+        const simulationEncoder = gpu.device.createCommandEncoder({ label: "Simulation command encoder" });
+        for (let step = 0; step < substeps; step += 1) {
+          encodeSimulationStep(
+            simulationEncoder,
+            pipelines,
+            particles,
+            grid,
+            activeCellCount,
+            cellScanGroups,
+            settings.particleCount
+          );
+          particles.swap();
+        }
+        gpu.device.queue.submit([simulationEncoder.finish()]);
+        simulationEncodeMs = performance.now() - simulationStart;
+      } else {
+        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, 0, particles);
       }
 
-      const renderPass = encoder.beginRenderPass({
+      const renderEncoder = gpu.device.createCommandEncoder({ label: "Render command encoder" });
+      const shouldReadDebug = !debugReadbackPending && !paused && now - lastDebugReadback > 250;
+      if (shouldReadDebug) {
+        renderEncoder.copyBufferToBuffer(grid.debugCounters, 0, grid.debugReadback, 0, grid.debugCounterBytes);
+      }
+
+      const renderPass = renderEncoder.beginRenderPass({
         label: "Particle render pass",
         colorAttachments: [
           {
@@ -145,7 +138,44 @@ async function start() {
       renderPass.draw(6, settings.particleCount);
       renderPass.end();
 
-      gpu.device.queue.submit([encoder.finish()]);
+      gpu.device.queue.submit([renderEncoder.finish()]);
+      if (shouldReadDebug) {
+        debugReadbackPending = true;
+        lastDebugReadback = now;
+        grid.debugReadback
+          .mapAsync(GPUMapMode.READ)
+          .then(() => {
+            try {
+              const counters = new Uint32Array(grid.debugReadback.getMappedRange());
+              latestMaxCellOccupancy = counters[0] ?? 0;
+              latestGridOverflow = counters[1] ?? 0;
+            } finally {
+              grid.debugReadback.unmap();
+            }
+          })
+          .catch(() => {
+            latestMaxCellOccupancy = 0;
+            latestGridOverflow = 0;
+          })
+          .finally(() => {
+            debugReadbackPending = false;
+          });
+      }
+
+      const frameMs = performance.now() - frameStart;
+      smoothedFrameMs = smoothTiming(smoothedFrameMs, frameMs);
+      smoothedSimulationEncodeMs = smoothTiming(smoothedSimulationEncodeMs, simulationEncodeMs);
+      if (now - lastDebugUiRefresh > 100) {
+        ui.setDebugStats({
+          substeps: clampSubsteps(settings.substeps),
+          maxCellOccupancy: latestMaxCellOccupancy,
+          gridOverflow: latestGridOverflow,
+          frameMs: smoothedFrameMs,
+          simulationEncodeMs: smoothedSimulationEncodeMs
+        });
+        lastDebugUiRefresh = now;
+      }
+
       requestAnimationFrame(frame);
     };
 
@@ -162,6 +192,15 @@ type ControlBindings = {
   onPauseToggle: () => void;
   onMaterialPresetChange: (preset: MaterialPreset) => void;
   setPaused: (paused: boolean) => void;
+  setDebugStats: (stats: DebugStats) => void;
+};
+
+type DebugStats = {
+  substeps: number;
+  maxCellOccupancy: number;
+  gridOverflow: number;
+  frameMs: number;
+  simulationEncodeMs: number;
 };
 
 function bindControls(settings: SimulationSettings): ControlBindings {
@@ -171,6 +210,14 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   const gravityOutput = getOutput("gravity-output");
   const damping = getInput("damping");
   const dampingOutput = getOutput("damping-output");
+  const substeps = getInput("substeps");
+  const substepsOutput = getOutput("substeps-output");
+  const bondIterations = getInput("bond-iterations");
+  const bondIterationsOutput = getOutput("bond-iterations-output");
+  const softBodyStrength = getInput("soft-body-strength");
+  const softBodyStrengthOutput = getOutput("soft-body-strength-output");
+  const viscosity = getInput("viscosity");
+  const viscosityOutput = getOutput("viscosity-output");
   const mouseForce = getInput("mouse-force");
   const mouseForceOutput = getOutput("mouse-force-output");
   const repulsion = getInput("repulsion");
@@ -187,13 +234,32 @@ function bindControls(settings: SimulationSettings): ControlBindings {
     onMaterialPresetChange: () => undefined,
     setPaused(paused: boolean) {
       pauseButton.textContent = paused ? "Resume" : "Pause";
+    },
+    setDebugStats(stats) {
+      const overflow = stats.gridOverflow > 0 ? ` | overflow ${stats.gridOverflow.toLocaleString()}` : "";
+      debugLabel.textContent = `substeps ${stats.substeps}x | cell max ${stats.maxCellOccupancy.toLocaleString()}${overflow} | encode ${stats.simulationEncodeMs.toFixed(1)}ms | frame ${stats.frameMs.toFixed(1)}ms`;
     }
   };
+
+  particleCount.value = String(settings.particleCount);
+  gravity.value = String(settings.gravityY);
+  damping.value = String(settings.damping);
+  substeps.value = String(settings.substeps);
+  bondIterations.value = String(settings.bondIterations);
+  softBodyStrength.value = String(settings.softBodyStrength);
+  viscosity.value = String(settings.viscosity);
+  mouseForce.value = String(settings.mouseForce);
+  repulsion.value = String(settings.particleRepulsion);
+  cohesion.value = String(settings.cohesion);
 
   const refresh = () => {
     particleCountOutput.value = settings.particleCount.toLocaleString();
     gravityOutput.value = settings.gravityY.toFixed(0);
     dampingOutput.value = settings.damping.toFixed(2);
+    substepsOutput.value = clampSubsteps(settings.substeps).toFixed(0);
+    bondIterationsOutput.value = clampBondIterations(settings.bondIterations).toFixed(0);
+    softBodyStrengthOutput.value = settings.softBodyStrength.toFixed(0);
+    viscosityOutput.value = settings.viscosity.toFixed(1);
     mouseForceOutput.value = settings.mouseForce.toLocaleString();
     repulsionOutput.value = settings.particleRepulsion.toFixed(0);
     cohesionOutput.value = settings.cohesion.toFixed(2);
@@ -212,6 +278,26 @@ function bindControls(settings: SimulationSettings): ControlBindings {
 
   damping.addEventListener("input", () => {
     settings.damping = damping.valueAsNumber;
+    refresh();
+  });
+
+  substeps.addEventListener("input", () => {
+    settings.substeps = clampSubsteps(substeps.valueAsNumber);
+    refresh();
+  });
+
+  bondIterations.addEventListener("input", () => {
+    settings.bondIterations = clampBondIterations(bondIterations.valueAsNumber);
+    refresh();
+  });
+
+  softBodyStrength.addEventListener("input", () => {
+    settings.softBodyStrength = softBodyStrength.valueAsNumber;
+    refresh();
+  });
+
+  viscosity.addEventListener("input", () => {
+    settings.viscosity = viscosity.valueAsNumber;
     refresh();
   });
 
@@ -238,6 +324,73 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   resetButton.addEventListener("click", () => bindings.onReset());
   refresh();
   return bindings;
+}
+
+function encodeSimulationStep(
+  encoder: GPUCommandEncoder,
+  pipelines: Pipelines,
+  particles: ParticleBuffers,
+  grid: GridBuffers,
+  activeCellCount: number,
+  cellScanGroups: number,
+  particleCount: number
+) {
+  const clearGridPass = encoder.beginComputePass({ label: "Clear spatial grid pass" });
+  clearGridPass.setPipeline(pipelines.clearGridPipeline);
+  clearGridPass.setBindGroup(0, pipelines.clearGridBindGroup);
+  clearGridPass.dispatchWorkgroups(Math.ceil(activeCellCount / WORKGROUP_SIZE));
+  clearGridPass.end();
+
+  const countGridPass = encoder.beginComputePass({ label: "Count spatial grid pass" });
+  countGridPass.setPipeline(pipelines.countGridPipeline);
+  countGridPass.setBindGroup(0, pipelines.countGridBindGroups[particles.activeIndex]);
+  countGridPass.dispatchWorkgroups(Math.ceil(particleCount / WORKGROUP_SIZE));
+  countGridPass.end();
+
+  const scanCellStartsPass = encoder.beginComputePass({ label: "Scan cell starts pass" });
+  scanCellStartsPass.setPipeline(pipelines.scanCellStartsPipeline);
+  scanCellStartsPass.setBindGroup(0, pipelines.scanCellStartsBindGroup);
+  scanCellStartsPass.dispatchWorkgroups(cellScanGroups);
+  scanCellStartsPass.end();
+
+  const scanGroupOffsetsPass = encoder.beginComputePass({ label: "Scan grid group offsets pass" });
+  scanGroupOffsetsPass.setPipeline(pipelines.scanGroupOffsetsPipeline);
+  scanGroupOffsetsPass.setBindGroup(0, pipelines.scanGroupOffsetsBindGroup);
+  scanGroupOffsetsPass.dispatchWorkgroups(1);
+  scanGroupOffsetsPass.end();
+
+  const addCellOffsetsPass = encoder.beginComputePass({ label: "Add cell offsets pass" });
+  addCellOffsetsPass.setPipeline(pipelines.addCellOffsetsPipeline);
+  addCellOffsetsPass.setBindGroup(0, pipelines.addCellOffsetsBindGroup);
+  addCellOffsetsPass.dispatchWorkgroups(Math.ceil(activeCellCount / WORKGROUP_SIZE));
+  addCellOffsetsPass.end();
+
+  const scatterGridPass = encoder.beginComputePass({ label: "Scatter spatial grid pass" });
+  scatterGridPass.setPipeline(pipelines.scatterGridPipeline);
+  scatterGridPass.setBindGroup(0, pipelines.scatterGridBindGroups[particles.activeIndex]);
+  scatterGridPass.dispatchWorkgroups(Math.ceil(particleCount / WORKGROUP_SIZE));
+  scatterGridPass.end();
+
+  const simulatePass = encoder.beginComputePass({ label: "Particle simulation pass" });
+  simulatePass.setPipeline(pipelines.simulatePipeline);
+  simulatePass.setBindGroup(0, pipelines.simulateBindGroups[particles.activeIndex]);
+  simulatePass.dispatchWorkgroups(Math.ceil(particleCount / WORKGROUP_SIZE));
+  simulatePass.end();
+}
+
+function clampSubsteps(value: number) {
+  return Math.min(8, Math.max(1, Math.floor(value || 1)));
+}
+
+function clampBondIterations(value: number) {
+  return Math.min(8, Math.max(1, Math.floor(value || 1)));
+}
+
+function smoothTiming(previous: number, next: number) {
+  if (previous === 0) {
+    return next;
+  }
+  return previous * 0.88 + next * 0.12;
 }
 
 function getInput(id: string): HTMLInputElement {

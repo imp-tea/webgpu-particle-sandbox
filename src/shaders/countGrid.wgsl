@@ -24,14 +24,18 @@ struct SimParams {
   gridRows: u32,
   gridParticleCapacity: u32,
   cohesion: f32,
-  padding0: f32,
-  padding1: f32,
-  padding2: f32,
+  softBodyStrength: f32,
+  viscosity: f32,
+  restColumns: u32,
+  restRows: u32,
+  bondIterations: u32,
+  restCellSize: vec2<f32>,
 };
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> cellCounts: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: SimParams;
+@group(0) @binding(3) var<storage, read_write> debugCounters: array<atomic<u32>>;
 
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
@@ -43,7 +47,8 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let particle = particles[particleIndex];
   let cell = particleCell(particle.position);
   let cellIndex = cell.y * params.gridColumns + cell.x;
-  atomicAdd(&cellCounts[cellIndex], 1u);
+  let occupancy = atomicAdd(&cellCounts[cellIndex], 1u) + 1u;
+  atomicMax(&debugCounters[0], occupancy);
 }
 
 fn particleCell(position: vec2<f32>) -> vec2<u32> {

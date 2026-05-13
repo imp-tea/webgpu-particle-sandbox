@@ -1,4 +1,5 @@
 import {
+  DEBUG_COUNTER_BYTES,
   DEFAULT_CONFIG,
   GRID_CELL_SIZE,
   GRID_PARTICLE_CAPACITY,
@@ -19,6 +20,10 @@ export type ParticleBuffers = {
   buffers: [GPUBuffer, GPUBuffer];
   activeIndex: number;
   maxParticles: number;
+  restColumns: number;
+  restRows: number;
+  restCellWidth: number;
+  restCellHeight: number;
   reset: (device: GPUDevice, count: number, worldWidth: number, worldHeight: number) => void;
   swap: () => void;
 };
@@ -30,6 +35,9 @@ export type GridBuffers = {
   cellWriteOffsets: GPUBuffer;
   cellGroupSums: GPUBuffer;
   cellGroupOffsets: GPUBuffer;
+  debugCounters: GPUBuffer;
+  debugReadback: GPUBuffer;
+  debugCounterBytes: number;
   maxCells: number;
   particleCapacity: number;
   scanBlockSize: number;
@@ -55,10 +63,18 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
     buffers,
     activeIndex: 0,
     maxParticles,
+    restColumns: 1,
+    restRows: 1,
+    restCellWidth: 1,
+    restCellHeight: 1,
     reset(device, count, worldWidth, worldHeight) {
-      const particleData = createInitialParticleData(count, worldWidth, worldHeight);
-      device.queue.writeBuffer(buffers[0], 0, particleData);
-      device.queue.writeBuffer(buffers[1], 0, particleData);
+      const initial = createInitialParticleData(count, worldWidth, worldHeight);
+      device.queue.writeBuffer(buffers[0], 0, initial.data);
+      device.queue.writeBuffer(buffers[1], 0, initial.data);
+      this.restColumns = initial.columns;
+      this.restRows = initial.rows;
+      this.restCellWidth = initial.cellWidth;
+      this.restCellHeight = initial.cellHeight;
       this.activeIndex = 0;
     },
     swap() {
@@ -123,6 +139,17 @@ export function createGridBuffers(device: GPUDevice): GridBuffers {
       size: MAX_SCAN_GROUPS * Uint32Array.BYTES_PER_ELEMENT,
       usage: GPUBufferUsage.STORAGE
     }),
+    debugCounters: device.createBuffer({
+      label: "Simulation debug counters",
+      size: DEBUG_COUNTER_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    }),
+    debugReadback: device.createBuffer({
+      label: "Simulation debug readback",
+      size: DEBUG_COUNTER_BYTES,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    }),
+    debugCounterBytes: DEBUG_COUNTER_BYTES,
     maxCells: MAX_GRID_CELLS,
     particleCapacity: GRID_PARTICLE_CAPACITY,
     scanBlockSize: SCAN_BLOCK_SIZE,
@@ -238,7 +265,8 @@ export function writeSimParams(
   pointer: PointerState,
   worldWidth: number,
   worldHeight: number,
-  deltaTime: number
+  deltaTime: number,
+  restLayout: Pick<ParticleBuffers, "restColumns" | "restRows" | "restCellWidth" | "restCellHeight">
 ) {
   const data = new ArrayBuffer(SIM_PARAMS_BYTES);
   const view = new DataView(data);
@@ -263,14 +291,18 @@ export function writeSimParams(
   view.setUint32(56, grid.rows, true);
   view.setUint32(60, GRID_PARTICLE_CAPACITY, true);
   view.setFloat32(64, settings.cohesion, true);
-  view.setFloat32(68, 0, true);
-  view.setFloat32(72, 0, true);
-  view.setFloat32(76, 0, true);
+  view.setFloat32(68, settings.softBodyStrength, true);
+  view.setFloat32(72, settings.viscosity, true);
+  view.setUint32(76, restLayout.restColumns, true);
+  view.setUint32(80, restLayout.restRows, true);
+  view.setUint32(84, settings.bondIterations, true);
+  view.setFloat32(88, restLayout.restCellWidth, true);
+  view.setFloat32(92, restLayout.restCellHeight, true);
 
   device.queue.writeBuffer(uniformBuffer, 0, data);
 }
 
-function createInitialParticleData(count: number, worldWidth: number, worldHeight: number): ArrayBuffer {
+function createInitialParticleData(count: number, worldWidth: number, worldHeight: number) {
   const data = new ArrayBuffer(count * PARTICLE_STRIDE_BYTES);
   const view = new DataView(data);
   const rng = mulberry32(0x5eed1234);
@@ -306,7 +338,7 @@ function createInitialParticleData(count: number, worldWidth: number, worldHeigh
     view.setFloat32(offset + 28, radius * radius, true);
   }
 
-  return data;
+  return { data, columns, rows, cellWidth, cellHeight };
 }
 
 function mulberry32(seed: number) {

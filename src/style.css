@@ -42,6 +42,8 @@ body {
   top: 16px;
   left: 16px;
   width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
   display: grid;
   gap: 14px;
   padding: 16px;
@@ -70,6 +72,11 @@ p {
   margin: 4px 0 0;
   color: #9fb0b5;
   font-size: 0.82rem;
+}
+
+#debug-stats {
+  color: #8fc7d2;
+  font-variant-numeric: tabular-nums;
 }
 
 .button-row {
@@ -141,6 +148,7 @@ select:focus {
     top: 10px;
     left: 10px;
     width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
     padding: 12px;
     gap: 11px;
   }
