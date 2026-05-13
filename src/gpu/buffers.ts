@@ -353,7 +353,7 @@ export function writeSimParams(
   view.setFloat32(64, settings.cohesion, true);
   view.setFloat32(68, settings.softBodyStrength, true);
   view.setFloat32(72, settings.viscosity, true);
-  view.setUint32(76, 0, true);
+  view.setUint32(76, settings.contactIterations, true);
   view.setUint32(80, 0, true);
   view.setUint32(84, settings.bondIterations, true);
   view.setFloat32(88, 1, true);

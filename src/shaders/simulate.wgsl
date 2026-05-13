@@ -26,7 +26,7 @@ struct SimParams {
   cohesion: f32,
   softBodyStrength: f32,
   viscosity: f32,
-  restColumns: u32,
+  contactIterations: u32,
   restRows: u32,
   bondIterations: u32,
   restCellSize: vec2<f32>,
@@ -176,7 +176,11 @@ fn pairForce(particle: Particle, other: Particle) -> vec2<f32> {
   let distance = sqrt(distanceSq);
   let restDistance = particle.radius + other.radius;
   let differentBody = particleBodyId(particle) != particleBodyId(other);
-  let interactionDistance = select(restDistance * 4.0, restDistance * 6.0, differentBody);
+  if (differentBody) {
+    return vec2<f32>(0.0);
+  }
+
+  let interactionDistance = restDistance * 4.0;
 
   if (distance >= interactionDistance) {
     return vec2<f32>(0.0);
@@ -187,10 +191,7 @@ fn pairForce(particle: Particle, other: Particle) -> vec2<f32> {
   let direction = delta / distance;
   let overlap = max(0.0, restDistance - distance) / restDistance;
   let repulsionScale = (material.dynamics.x + otherMaterial.dynamics.x) * 0.5;
-  let contactDistance = select(restDistance, restDistance * 2.65, differentBody);
-  let nearContact = max(0.0, contactDistance - distance) / contactDistance;
-  let bodyBarrier = select(0.0, nearContact * nearContact * params.particleRepulsion * 12.0, differentBody);
-  let repulsion = overlap * params.particleRepulsion * repulsionScale + bodyBarrier;
+  let repulsion = overlap * params.particleRepulsion * repulsionScale;
 
   let normalizedDistance = clamp(distance / interactionDistance, 0.0, 1.0);
   let attractionBand = smoothstep(0.30, 0.62, normalizedDistance) * (1.0 - smoothstep(0.62, 1.0, normalizedDistance));
@@ -198,11 +199,7 @@ fn pairForce(particle: Particle, other: Particle) -> vec2<f32> {
   let sameAffinity = (material.dynamics.z + otherMaterial.dynamics.z) * 0.5;
   let crossAffinity = (material.dynamics.w + otherMaterial.dynamics.w) * 0.5;
   let materialAffinity = select(crossAffinity, sameAffinity, particle.materialId == other.materialId);
-  let attraction = select(
-    attractionBand * params.particleRepulsion * materialAffinity * cohesionScale * params.cohesion,
-    0.0,
-    differentBody
-  );
+  let attraction = attractionBand * params.particleRepulsion * materialAffinity * cohesionScale * params.cohesion;
 
   let proximity = 1.0 - normalizedDistance;
   let velocityBlend = (other.velocity - particle.velocity) * params.viscosity * proximity * 0.35;

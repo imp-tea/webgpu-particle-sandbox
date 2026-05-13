@@ -20,6 +20,7 @@ export const DEFAULT_CONFIG = {
   gravityY: 280,
   damping: 0.25,
   substeps: 2,
+  contactIterations: 3,
   bondIterations: 4,
   softBodyStrength: 2_600,
   viscosity: 4,
@@ -34,6 +35,7 @@ export type SimulationSettings = {
   gravityY: number;
   damping: number;
   substeps: number;
+  contactIterations: number;
   bondIterations: number;
   softBodyStrength: number;
   viscosity: number;
@@ -49,6 +51,7 @@ export function defaultSettings(): SimulationSettings {
     gravityY: DEFAULT_CONFIG.gravityY,
     damping: DEFAULT_CONFIG.damping,
     substeps: DEFAULT_CONFIG.substeps,
+    contactIterations: DEFAULT_CONFIG.contactIterations,
     bondIterations: DEFAULT_CONFIG.bondIterations,
     softBodyStrength: DEFAULT_CONFIG.softBodyStrength,
     viscosity: DEFAULT_CONFIG.viscosity,

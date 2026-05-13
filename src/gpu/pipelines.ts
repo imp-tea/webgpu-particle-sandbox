@@ -7,6 +7,7 @@ import scanCellStartsShader from "../shaders/scanCellStarts.wgsl?raw";
 import scanGroupOffsetsShader from "../shaders/scanGroupOffsets.wgsl?raw";
 import scatterGridShader from "../shaders/scatterGrid.wgsl?raw";
 import simulateShader from "../shaders/simulate.wgsl?raw";
+import solveContactsShader from "../shaders/solveContacts.wgsl?raw";
 import type { GridBuffers } from "./buffers";
 
 export type Pipelines = {
@@ -17,6 +18,7 @@ export type Pipelines = {
   addCellOffsetsPipeline: GPUComputePipeline;
   scatterGridPipeline: GPUComputePipeline;
   simulatePipeline: GPUComputePipeline;
+  solveContactsPipeline: GPUComputePipeline;
   renderPipeline: GPURenderPipeline;
   clearGridBindGroup: GPUBindGroup;
   countGridBindGroups: [GPUBindGroup, GPUBindGroup];
@@ -25,6 +27,7 @@ export type Pipelines = {
   addCellOffsetsBindGroup: GPUBindGroup;
   scatterGridBindGroups: [GPUBindGroup, GPUBindGroup];
   simulateBindGroups: [GPUBindGroup, GPUBindGroup];
+  solveContactBindGroups: [GPUBindGroup, GPUBindGroup];
   renderBindGroups: [GPUBindGroup, GPUBindGroup];
 };
 
@@ -244,6 +247,42 @@ export function createPipelines(
     ]
   });
 
+  const solveContactBindGroupLayout = device.createBindGroupLayout({
+    label: "Contact solve bind group layout",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" }
+      },
+      {
+        binding: 2,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "uniform" }
+      },
+      {
+        binding: 3,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" }
+      },
+      {
+        binding: 4,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 5,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      }
+    ]
+  });
+
   const renderBindGroupLayout = device.createBindGroupLayout({
     label: "Particle render bind group layout",
     entries: [
@@ -439,6 +478,24 @@ export function createPipelines(
     ]
   });
 
+  const solveContactsPipeline = device.createComputePipeline({
+    label: "Contact solve pipeline",
+    layout: device.createPipelineLayout({
+      label: "Contact solve pipeline layout",
+      bindGroupLayouts: [solveContactBindGroupLayout]
+    }),
+    compute: {
+      module: device.createShaderModule({
+        label: "Contact solve shader",
+        code: solveContactsShader
+      }),
+      entryPoint: "main",
+      constants: {
+        WORKGROUP_SIZE
+      }
+    }
+  });
+
   const countGridBindGroups: [GPUBindGroup, GPUBindGroup] = [
     createCountGridBindGroup(
       device,
@@ -545,6 +602,31 @@ export function createPipelines(
     )
   ];
 
+  const solveContactBindGroups: [GPUBindGroup, GPUBindGroup] = [
+    createSolveContactBindGroup(
+      device,
+      solveContactBindGroupLayout,
+      particleBuffers[0],
+      particleBuffers[1],
+      uniformBuffer,
+      gridBuffers.cellCounts,
+      gridBuffers.cellStarts,
+      gridBuffers.pairValues,
+      "A to B"
+    ),
+    createSolveContactBindGroup(
+      device,
+      solveContactBindGroupLayout,
+      particleBuffers[1],
+      particleBuffers[0],
+      uniformBuffer,
+      gridBuffers.cellCounts,
+      gridBuffers.cellStarts,
+      gridBuffers.pairValues,
+      "B to A"
+    )
+  ];
+
   const renderBindGroups: [GPUBindGroup, GPUBindGroup] = [
     createRenderBindGroup(device, renderBindGroupLayout, particleBuffers[0], uniformBuffer, materialBuffer, "A"),
     createRenderBindGroup(device, renderBindGroupLayout, particleBuffers[1], uniformBuffer, materialBuffer, "B")
@@ -558,6 +640,7 @@ export function createPipelines(
     addCellOffsetsPipeline,
     scatterGridPipeline,
     simulatePipeline,
+    solveContactsPipeline,
     renderPipeline,
     clearGridBindGroup,
     countGridBindGroups,
@@ -566,6 +649,7 @@ export function createPipelines(
     addCellOffsetsBindGroup,
     scatterGridBindGroups,
     simulateBindGroups,
+    solveContactBindGroups,
     renderBindGroups
   };
 }
@@ -641,6 +725,31 @@ function createSimulateBindGroup(
       { binding: 5, resource: { buffer: pairValues } },
       { binding: 6, resource: { buffer: materialBuffer } },
       { binding: 7, resource: { buffer: bodyBuffer } }
+    ]
+  });
+}
+
+function createSolveContactBindGroup(
+  device: GPUDevice,
+  layout: GPUBindGroupLayout,
+  source: GPUBuffer,
+  destination: GPUBuffer,
+  uniformBuffer: GPUBuffer,
+  cellCounts: GPUBuffer,
+  cellStarts: GPUBuffer,
+  pairValues: GPUBuffer,
+  label: string
+) {
+  return device.createBindGroup({
+    label: `Contact solve bind group ${label}`,
+    layout,
+    entries: [
+      { binding: 0, resource: { buffer: source } },
+      { binding: 1, resource: { buffer: destination } },
+      { binding: 2, resource: { buffer: uniformBuffer } },
+      { binding: 3, resource: { buffer: cellCounts } },
+      { binding: 4, resource: { buffer: cellStarts } },
+      { binding: 5, resource: { buffer: pairValues } }
     ]
   });
 }

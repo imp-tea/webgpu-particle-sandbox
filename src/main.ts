@@ -114,7 +114,7 @@ async function start() {
         const simulationStart = performance.now();
         const simulationEncoder = gpu.device.createCommandEncoder({ label: "Simulation command encoder" });
         for (let step = 0; step < substeps; step += 1) {
-          encodeSimulationStep(
+          encodeGridBuild(
             simulationEncoder,
             pipelines,
             particles,
@@ -123,7 +123,22 @@ async function start() {
             cellScanGroups,
             settings.particleCount
           );
+          encodeSimulationIntegrate(simulationEncoder, pipelines, particles, settings.particleCount);
           particles.swap();
+
+          for (let iteration = 0; iteration < clampContactIterations(settings.contactIterations); iteration += 1) {
+            encodeGridBuild(
+              simulationEncoder,
+              pipelines,
+              particles,
+              grid,
+              activeCellCount,
+              cellScanGroups,
+              settings.particleCount
+            );
+            encodeContactSolve(simulationEncoder, pipelines, particles, settings.particleCount);
+            particles.swap();
+          }
         }
         gpu.device.queue.submit([simulationEncoder.finish()]);
         simulationEncodeMs = performance.now() - simulationStart;
@@ -234,6 +249,8 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   const dampingOutput = getOutput("damping-output");
   const substeps = getInput("substeps");
   const substepsOutput = getOutput("substeps-output");
+  const contactIterations = getInput("contact-iterations");
+  const contactIterationsOutput = getOutput("contact-iterations-output");
   const bondIterations = getInput("bond-iterations");
   const bondIterationsOutput = getOutput("bond-iterations-output");
   const softBodyStrength = getInput("soft-body-strength");
@@ -271,6 +288,7 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   gravity.value = String(settings.gravityY);
   damping.value = String(settings.damping);
   substeps.value = String(settings.substeps);
+  contactIterations.value = String(settings.contactIterations);
   bondIterations.value = String(settings.bondIterations);
   softBodyStrength.value = String(settings.softBodyStrength);
   viscosity.value = String(settings.viscosity);
@@ -284,6 +302,7 @@ function bindControls(settings: SimulationSettings): ControlBindings {
     gravityOutput.value = settings.gravityY.toFixed(0);
     dampingOutput.value = settings.damping.toFixed(2);
     substepsOutput.value = clampSubsteps(settings.substeps).toFixed(0);
+    contactIterationsOutput.value = clampContactIterations(settings.contactIterations).toFixed(0);
     bondIterationsOutput.value = clampBondIterations(settings.bondIterations).toFixed(0);
     softBodyStrengthOutput.value = settings.softBodyStrength.toFixed(0);
     viscosityOutput.value = settings.viscosity.toFixed(1);
@@ -312,6 +331,11 @@ function bindControls(settings: SimulationSettings): ControlBindings {
 
   substeps.addEventListener("input", () => {
     settings.substeps = clampSubsteps(substeps.valueAsNumber);
+    refresh();
+  });
+
+  contactIterations.addEventListener("input", () => {
+    settings.contactIterations = clampContactIterations(contactIterations.valueAsNumber);
     refresh();
   });
 
@@ -359,7 +383,7 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   return bindings;
 }
 
-function encodeSimulationStep(
+function encodeGridBuild(
   encoder: GPUCommandEncoder,
   pipelines: Pipelines,
   particles: ParticleBuffers,
@@ -403,7 +427,14 @@ function encodeSimulationStep(
   scatterGridPass.setBindGroup(0, pipelines.scatterGridBindGroups[particles.activeIndex]);
   scatterGridPass.dispatchWorkgroups(Math.ceil(particleCount / WORKGROUP_SIZE));
   scatterGridPass.end();
+}
 
+function encodeSimulationIntegrate(
+  encoder: GPUCommandEncoder,
+  pipelines: Pipelines,
+  particles: ParticleBuffers,
+  particleCount: number
+) {
   const simulatePass = encoder.beginComputePass({ label: "Particle simulation pass" });
   simulatePass.setPipeline(pipelines.simulatePipeline);
   simulatePass.setBindGroup(0, pipelines.simulateBindGroups[particles.activeIndex]);
@@ -411,8 +442,25 @@ function encodeSimulationStep(
   simulatePass.end();
 }
 
+function encodeContactSolve(
+  encoder: GPUCommandEncoder,
+  pipelines: Pipelines,
+  particles: ParticleBuffers,
+  particleCount: number
+) {
+  const contactPass = encoder.beginComputePass({ label: "Contact projection pass" });
+  contactPass.setPipeline(pipelines.solveContactsPipeline);
+  contactPass.setBindGroup(0, pipelines.solveContactBindGroups[particles.activeIndex]);
+  contactPass.dispatchWorkgroups(Math.ceil(particleCount / WORKGROUP_SIZE));
+  contactPass.end();
+}
+
 function clampSubsteps(value: number) {
   return Math.min(8, Math.max(1, Math.floor(value || 1)));
+}
+
+function clampContactIterations(value: number) {
+  return Math.min(8, Math.max(0, Math.floor(value || 0)));
 }
 
 function clampBondIterations(value: number) {
