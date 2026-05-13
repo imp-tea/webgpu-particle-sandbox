@@ -8,6 +8,7 @@ import scanGroupOffsetsShader from "../shaders/scanGroupOffsets.wgsl?raw";
 import scatterGridShader from "../shaders/scatterGrid.wgsl?raw";
 import simulateShader from "../shaders/simulate.wgsl?raw";
 import solveContactsShader from "../shaders/solveContacts.wgsl?raw";
+import solveJointsShader from "../shaders/solveJoints.wgsl?raw";
 import type { GridBuffers } from "./buffers";
 
 export type Pipelines = {
@@ -18,6 +19,7 @@ export type Pipelines = {
   addCellOffsetsPipeline: GPUComputePipeline;
   scatterGridPipeline: GPUComputePipeline;
   simulatePipeline: GPUComputePipeline;
+  solveJointsPipeline: GPUComputePipeline;
   solveContactsPipeline: GPUComputePipeline;
   renderPipeline: GPURenderPipeline;
   clearGridBindGroup: GPUBindGroup;
@@ -27,6 +29,7 @@ export type Pipelines = {
   addCellOffsetsBindGroup: GPUBindGroup;
   scatterGridBindGroups: [GPUBindGroup, GPUBindGroup];
   simulateBindGroups: [GPUBindGroup, GPUBindGroup];
+  solveJointBindGroups: [GPUBindGroup, GPUBindGroup];
   solveContactBindGroups: [GPUBindGroup, GPUBindGroup];
   renderBindGroups: [GPUBindGroup, GPUBindGroup];
 };
@@ -40,7 +43,8 @@ export function createPipelines(
   materialBuffer: GPUBuffer,
   bodyBuffer: GPUBuffer,
   bondBuffer: GPUBuffer,
-  restShapeBuffer: GPUBuffer
+  restShapeBuffer: GPUBuffer,
+  jointBuffer: GPUBuffer
 ): Pipelines {
   const clearGridBindGroupLayout = device.createBindGroupLayout({
     label: "Clear grid bind group layout",
@@ -276,6 +280,47 @@ export function createPipelines(
         binding: 6,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 7,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      }
+    ]
+  });
+
+  const solveJointBindGroupLayout = device.createBindGroupLayout({
+    label: "Joint solve bind group layout",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 1,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "storage" }
+      },
+      {
+        binding: 2,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "uniform" }
+      },
+      {
+        binding: 3,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 4,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 5,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
       }
     ]
   });
@@ -413,6 +458,24 @@ export function createPipelines(
       module: device.createShaderModule({
         label: "Simulation shader",
         code: simulateShader
+      }),
+      entryPoint: "main",
+      constants: {
+        WORKGROUP_SIZE
+      }
+    }
+  });
+
+  const solveJointsPipeline = device.createComputePipeline({
+    label: "Joint solve pipeline",
+    layout: device.createPipelineLayout({
+      label: "Joint solve pipeline layout",
+      bindGroupLayouts: [solveJointBindGroupLayout]
+    }),
+    compute: {
+      module: device.createShaderModule({
+        label: "Joint solve shader",
+        code: solveJointsShader
       }),
       entryPoint: "main",
       constants: {
@@ -595,6 +658,31 @@ export function createPipelines(
     )
   ];
 
+  const solveJointBindGroups: [GPUBindGroup, GPUBindGroup] = [
+    createSolveJointBindGroup(
+      device,
+      solveJointBindGroupLayout,
+      particleBuffers[0],
+      particleBuffers[1],
+      uniformBuffer,
+      bodyBuffer,
+      restShapeBuffer,
+      jointBuffer,
+      "A to B"
+    ),
+    createSolveJointBindGroup(
+      device,
+      solveJointBindGroupLayout,
+      particleBuffers[1],
+      particleBuffers[0],
+      uniformBuffer,
+      bodyBuffer,
+      restShapeBuffer,
+      jointBuffer,
+      "B to A"
+    )
+  ];
+
   const solveContactBindGroups: [GPUBindGroup, GPUBindGroup] = [
     createSolveContactBindGroup(
       device,
@@ -606,6 +694,7 @@ export function createPipelines(
       gridBuffers.cellStarts,
       gridBuffers.pairValues,
       bodyBuffer,
+      jointBuffer,
       "A to B"
     ),
     createSolveContactBindGroup(
@@ -618,6 +707,7 @@ export function createPipelines(
       gridBuffers.cellStarts,
       gridBuffers.pairValues,
       bodyBuffer,
+      jointBuffer,
       "B to A"
     )
   ];
@@ -635,6 +725,7 @@ export function createPipelines(
     addCellOffsetsPipeline,
     scatterGridPipeline,
     simulatePipeline,
+    solveJointsPipeline,
     solveContactsPipeline,
     renderPipeline,
     clearGridBindGroup,
@@ -644,6 +735,7 @@ export function createPipelines(
     addCellOffsetsBindGroup,
     scatterGridBindGroups,
     simulateBindGroups,
+    solveJointBindGroups,
     solveContactBindGroups,
     renderBindGroups
   };
@@ -720,6 +812,31 @@ function createSimulateBindGroup(
   });
 }
 
+function createSolveJointBindGroup(
+  device: GPUDevice,
+  layout: GPUBindGroupLayout,
+  source: GPUBuffer,
+  destination: GPUBuffer,
+  uniformBuffer: GPUBuffer,
+  bodyBuffer: GPUBuffer,
+  restShapeBuffer: GPUBuffer,
+  jointBuffer: GPUBuffer,
+  label: string
+) {
+  return device.createBindGroup({
+    label: `Joint solve bind group ${label}`,
+    layout,
+    entries: [
+      { binding: 0, resource: { buffer: source } },
+      { binding: 1, resource: { buffer: destination } },
+      { binding: 2, resource: { buffer: uniformBuffer } },
+      { binding: 3, resource: { buffer: bodyBuffer } },
+      { binding: 4, resource: { buffer: restShapeBuffer } },
+      { binding: 5, resource: { buffer: jointBuffer } }
+    ]
+  });
+}
+
 function createSolveContactBindGroup(
   device: GPUDevice,
   layout: GPUBindGroupLayout,
@@ -730,6 +847,7 @@ function createSolveContactBindGroup(
   cellStarts: GPUBuffer,
   pairValues: GPUBuffer,
   bodyBuffer: GPUBuffer,
+  jointBuffer: GPUBuffer,
   label: string
 ) {
   return device.createBindGroup({
@@ -742,7 +860,8 @@ function createSolveContactBindGroup(
       { binding: 3, resource: { buffer: cellCounts } },
       { binding: 4, resource: { buffer: cellStarts } },
       { binding: 5, resource: { buffer: pairValues } },
-      { binding: 6, resource: { buffer: bodyBuffer } }
+      { binding: 6, resource: { buffer: bodyBuffer } },
+      { binding: 7, resource: { buffer: jointBuffer } }
     ]
   });
 }

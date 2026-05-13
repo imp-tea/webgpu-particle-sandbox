@@ -15,7 +15,7 @@
           <div>
             <h1>Particle Sandbox</h1>
             <p id="gpu-status">Initializing WebGPU...</p>
-            <p id="debug-stats">substeps 8x | cell max -- | encode --ms | frame --ms</p>
+            <p id="debug-stats">substeps 4x | cell max -- | encode --ms | frame --ms</p>
           </div>
           <div class="button-row">
             <button id="pause-button" type="button">Pause</button>
@@ -27,6 +27,7 @@
           <span>Body <output id="body-stats-output">0 / 0</output></span>
           <select id="body-shape">
             <option value="square">Square</option>
+            <option value="rectangle">Rectangle</option>
             <option value="circle">Circle</option>
             <option value="triangle">Triangle</option>
           </select>
@@ -65,8 +66,8 @@
         </label>
 
         <label>
-          <span>Substeps <output id="substeps-output">8</output></span>
-          <input id="substeps" type="range" min="1" max="8" step="1" value="8" />
+          <span>Substeps <output id="substeps-output">4</output></span>
+          <input id="substeps" type="range" min="1" max="8" step="1" value="4" />
         </label>
 
         <label>
@@ -80,8 +81,8 @@
         </label>
 
         <label>
-          <span>Elasticity <output id="soft-body-strength-output">2600</output></span>
-          <input id="soft-body-strength" type="range" min="0" max="6000" step="50" value="2600" />
+          <span>Elasticity <output id="soft-body-strength-output">2000</output></span>
+          <input id="soft-body-strength" type="range" min="0" max="6000" step="50" value="2000" />
         </label>
 
         <label>
@@ -94,14 +95,19 @@
           <input id="friction" type="range" min="0" max="1" step="0.01" value="0.18" />
         </label>
 
-        <label>
-          <span>Wall bounce <output id="wall-bounce-output">0.42</output></span>
-          <input id="wall-bounce" type="range" min="0" max="0.9" step="0.01" value="0.42" />
+        <label id="motor-strength-control" hidden>
+          <span>Motor strength <output id="motor-strength-output">88</output></span>
+          <input id="motor-strength" type="range" min="0" max="240" step="1" value="88" />
         </label>
 
         <label>
-          <span>Drag strength <output id="mouse-force-output">180000</output></span>
-          <input id="mouse-force" type="range" min="0" max="180000" step="5000" value="180000" />
+          <span>Wall bounce <output id="wall-bounce-output">0</output></span>
+          <input id="wall-bounce" type="range" min="0" max="0.9" step="0.01" value="0" />
+        </label>
+
+        <label>
+          <span>Drag strength <output id="mouse-force-output">5000</output></span>
+          <input id="mouse-force" type="range" min="0" max="180000" step="5000" value="5000" />
         </label>
       </section>
     </main>

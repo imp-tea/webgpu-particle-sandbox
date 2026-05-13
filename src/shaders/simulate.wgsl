@@ -29,13 +29,17 @@ struct SimParams {
   contactIterations: u32,
   selectedParticleIndex: u32,
   bondIterations: u32,
-  restCellSize: vec2<f32>,
+  jointCount: u32,
+  jointIterations: u32,
+  solverPhase: u32,
+  padding2: vec3<u32>,
 };
 
 struct BodyParams {
   startIndex: u32,
   particleCount: u32,
-  padding0: vec2<u32>,
+  motorTargetAngularVelocity: f32,
+  motorStrength: f32,
   softBodyStrength: f32,
   viscosity: f32,
   friction: f32,
@@ -66,6 +70,7 @@ const BODY_ID_MASK: u32 = 0x0000ffffu;
 const BOND_SLOT_COUNT: u32 = 8u;
 const INVALID_BOND_INDEX: u32 = 0xffffffffu;
 const SHAPE_MATCH_SAMPLE_COUNT: u32 = 24u;
+const FLOOR_TANGENT_SLEEP_SPEED: f32 = 5.0;
 
 // Integrates particles from a source state buffer into a destination state buffer.
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -81,7 +86,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     return;
   }
 
-  var acceleration = params.gravity + dragAcceleration(index, particle);
+  var acceleration = params.gravity + dragAcceleration(index, particle) + motorAcceleration(index, particle);
 
   var velocity = particle.velocity + acceleration * params.deltaTime;
   velocity *= max(0.0, 1.0 - params.damping * params.deltaTime);
@@ -131,6 +136,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     position.y = params.worldSize.y - r;
     velocity.y = -abs(velocity.y) * bounce;
     velocity.x *= wallTangentRetain;
+    if (abs(velocity.x) < FLOOR_TANGENT_SLEEP_SPEED) {
+      velocity.x = 0.0;
+    }
   }
 
   particle.position = position;
@@ -160,9 +168,11 @@ fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> 
   let iterationStiffness = 1.0 - pow(1.0 - targetStiffness, 1.0 / f32(iterations));
   var position = predictedPosition;
 
+  let reverseSlots = (params.solverPhase & 1u) == 1u;
   for (var iteration = 0u; iteration < iterations; iteration += 1u) {
     for (var slot = 0u; slot < BOND_SLOT_COUNT; slot += 1u) {
-      let bond = bonds[index * BOND_SLOT_COUNT + slot];
+      let orderedSlot = select(slot, BOND_SLOT_COUNT - 1u - slot, reverseSlots);
+      let bond = bonds[index * BOND_SLOT_COUNT + orderedSlot];
       position = relaxBond(position, bodyId, bond, iterationStiffness);
     }
   }
@@ -194,6 +204,57 @@ fn dragAcceleration(index: u32, particle: Particle) -> vec2<f32> {
   return dragDelta * params.mouseForce * falloff * selectedBoost / max(particle.mass, 0.001);
 }
 
+fn motorAcceleration(index: u32, particle: Particle) -> vec2<f32> {
+  if (params.deltaTime <= 0.000001) {
+    return vec2<f32>(0.0);
+  }
+
+  let bodyId = particleBodyId(particle);
+  let body = bodies[bodyId];
+  if (abs(body.motorTargetAngularVelocity) <= 0.0001 || body.motorStrength <= 0.0 || body.particleCount < 2u) {
+    return vec2<f32>(0.0);
+  }
+
+  let center = bodyCenter(bodyId);
+  let radial = particle.position - center;
+  let radialLengthSq = dot(radial, radial);
+  if (radialLengthSq <= 0.0001) {
+    return vec2<f32>(0.0);
+  }
+
+  let radialLength = sqrt(radialLengthSq);
+  let tangent = vec2<f32>(-radial.y, radial.x) / radialLength;
+  let currentTangentialVelocity = tangent * dot(particle.velocity, tangent);
+  let targetTangentialVelocity = tangent * body.motorTargetAngularVelocity * radialLength;
+  let motorDelta = targetTangentialVelocity - currentTangentialVelocity;
+  let rimFactor = smoothstep(particle.radius * 2.0, particle.radius * 8.0, radialLength);
+
+  return motorDelta * body.motorStrength * rimFactor / max(particle.mass, 0.001);
+}
+
+fn bodyCenter(bodyId: u32) -> vec2<f32> {
+  let body = bodies[bodyId];
+  let sampleCount = min(body.particleCount, SHAPE_MATCH_SAMPLE_COUNT);
+  var center = vec2<f32>(0.0);
+  var validSamples = 0.0;
+
+  for (var sample = 0u; sample < sampleCount; sample += 1u) {
+    let sampleLocalIndex = phasedSampleLocalIndex(sample, sampleCount, body.particleCount);
+    let sampleIndex = body.startIndex + sampleLocalIndex;
+    let sampleParticle = particlesIn[sampleIndex];
+    if (particleActive(sampleParticle) && particleBodyId(sampleParticle) == bodyId) {
+      center += sampleParticle.position;
+      validSamples += 1.0;
+    }
+  }
+
+  if (validSamples <= 0.0) {
+    return vec2<f32>(0.0);
+  }
+
+  return center / validSamples;
+}
+
 fn applyShapeMemory(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> {
   if (params.deltaTime <= 0.000001) {
     return predictedPosition;
@@ -221,7 +282,7 @@ fn applyShapeMemory(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> {
   var validSamples = 0.0;
 
   for (var sample = 0u; sample < sampleCount; sample += 1u) {
-    let sampleLocalIndex = min(body.particleCount - 1u, (sample * body.particleCount) / sampleCount);
+    let sampleLocalIndex = phasedSampleLocalIndex(sample, sampleCount, body.particleCount);
     let sampleIndex = body.startIndex + sampleLocalIndex;
     let particle = particlesIn[sampleIndex];
     if (particleActive(particle) && particleBodyId(particle) == bodyId) {
@@ -242,7 +303,7 @@ fn applyShapeMemory(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> {
   var sineSum = 0.0;
 
   for (var sample = 0u; sample < sampleCount; sample += 1u) {
-    let sampleLocalIndex = min(body.particleCount - 1u, (sample * body.particleCount) / sampleCount);
+    let sampleLocalIndex = phasedSampleLocalIndex(sample, sampleCount, body.particleCount);
     let sampleIndex = body.startIndex + sampleLocalIndex;
     let particle = particlesIn[sampleIndex];
     if (particleActive(particle) && particleBodyId(particle) == bodyId) {
@@ -376,6 +437,18 @@ fn relaxBond(position: vec2<f32>, bodyId: u32, bond: Bond, iterationStiffness: f
   let correction = stretch * 0.5 * iterationStiffness * bond.weight;
 
   return position - direction * correction;
+}
+
+fn phasedSampleLocalIndex(sample: u32, sampleCount: u32, particleCount: u32) -> u32 {
+  if (sampleCount == 0u || particleCount == 0u) {
+    return 0u;
+  }
+
+  let base = (sample * particleCount) / sampleCount;
+  let phaseOffset = params.solverPhase % particleCount;
+  let mirrored = (sample & 1u) == 1u;
+  let phased = (base + phaseOffset) % particleCount;
+  return select(phased, particleCount - 1u - phased, mirrored);
 }
 
 fn particleActive(particle: Particle) -> bool {

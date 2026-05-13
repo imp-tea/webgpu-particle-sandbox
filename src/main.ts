@@ -4,13 +4,16 @@ import {
   createBondBuffer,
   createBodyBuffer,
   createGridBuffers,
+  createJointBuffer,
   createMaterialBuffer,
   createParticleBuffers,
   createRestShapeBuffer,
   createUniformBuffer,
   getGridDimensions,
   type BodyProperties,
+  type JointDefinition,
   type SoftBodyShape,
+  writeJointBuffer,
   writeSimParams,
   type GridBuffers,
   type ParticleBuffers
@@ -39,7 +42,8 @@ void start();
 
 async function start() {
   const settings = defaultSettings();
-  const ui = bindControls(settings);
+  const vehicle = createVehicleController();
+  const ui = bindControls(settings, vehicle);
   const vectorContext = vectorCanvas.getContext("2d");
   if (!vectorContext) {
     throw new Error("Could not create vector render context.");
@@ -55,6 +59,7 @@ async function start() {
     const bodies = createBodyBuffer(gpu.device);
     const bonds = createBondBuffer(gpu.device);
     const restShapes = createRestShapeBuffer(gpu.device);
+    const joints = createJointBuffer(gpu.device);
     const particlePickReadback = gpu.device.createBuffer({
       label: "Particle picking readback",
       size: particles.maxParticles * PARTICLE_STRIDE_BYTES,
@@ -67,6 +72,8 @@ async function start() {
     });
     const bodyProperties: BodyProperties[] = [];
     const bodyRenderInfos: BodyRenderInfo[] = [];
+    let jointDefinitions: JointDefinition[] = [];
+    let jointCount = 0;
     const pipelines = createPipelines(
       gpu.device,
       gpu.format,
@@ -76,7 +83,8 @@ async function start() {
       materials,
       bodies,
       bonds,
-      restShapes
+      restShapes,
+      joints
     );
 
     gpu.device.lost.then((info) => {
@@ -85,14 +93,33 @@ async function start() {
 
     gpu.resize();
     particles.clear(gpu.device, bodies, bonds, restShapes);
+    jointCount = writeJointBuffer(gpu.device, joints, jointDefinitions);
+    const initialVehicle = addVehicleScene(
+      gpu.device,
+      particles,
+      bodies,
+      bonds,
+      restShapes,
+      joints,
+      gpu.getWorldSize(),
+      settings,
+      bodyProperties,
+      bodyRenderInfos,
+      vehicle
+    );
+    jointDefinitions = initialVehicle.joints;
+    jointCount = initialVehicle.jointCount;
     settings.particleCount = particles.particleCount;
     ui.setBodyStats(particles.bodyCount, particles.particleCount);
-    statusLabel.textContent = `${gpu.adapter.info?.vendor || "GPU"} adapter ready`;
+    statusLabel.textContent = `${gpu.adapter.info?.vendor || "GPU"} ready | A/D drive wheels`;
 
     ui.onReset = () => {
       particles.clear(gpu.device, bodies, bonds, restShapes);
+      jointDefinitions = [];
+      jointCount = writeJointBuffer(gpu.device, joints, jointDefinitions);
       bodyProperties.length = 0;
       bodyRenderInfos.length = 0;
+      vehicle.clear();
       pointer.state.selectedParticleIndex = 0xffffffff;
       pointer.state.selectedBodyId = 0xffffffff;
       particleSnapshot = undefined;
@@ -206,6 +233,7 @@ async function start() {
     let lastDebugUiRefresh = 0;
     let smoothedFrameMs = 0;
     let smoothedSimulationEncodeMs = 0;
+    let solverFramePhase = 0;
 
     ui.onPauseToggle = () => {
       paused = !paused;
@@ -250,13 +278,28 @@ async function start() {
         const activeGrid = getGridDimensions(size.width, size.height);
         const activeCellCount = activeGrid.columns * activeGrid.rows;
         const cellScanGroups = Math.ceil(activeCellCount / grid.scanBlockSize);
-        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, subDeltaTime);
+        vehicle.updateMotors(gpu.device, particles, bodies);
+        writeSimParams(
+          gpu.device,
+          uniforms,
+          settings,
+          pointer.state,
+          size.width,
+          size.height,
+          subDeltaTime,
+          jointCount,
+          solverFramePhase
+        );
 
         const simulationStart = performance.now();
         const simulationEncoder = gpu.device.createCommandEncoder({ label: "Simulation command encoder" });
         for (let step = 0; step < substeps; step += 1) {
           encodeSimulationIntegrate(simulationEncoder, pipelines, particles, settings.particleCount);
           particles.swap();
+          for (let iteration = 0; iteration < clampJointIterations(settings.jointIterations); iteration += 1) {
+            encodeJointSolve(simulationEncoder, pipelines, particles, settings.particleCount);
+            particles.swap();
+          }
         }
 
         if (particles.bodyCount > 1) {
@@ -275,9 +318,11 @@ async function start() {
           }
         }
         gpu.device.queue.submit([simulationEncoder.finish()]);
+        solverFramePhase = (solverFramePhase + 1) & 0xffff;
         simulationEncodeMs = performance.now() - simulationStart;
       } else {
-        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, 0);
+        vehicle.updateMotors(gpu.device, particles, bodies);
+        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, 0, jointCount, solverFramePhase);
       }
 
       const renderEncoder = gpu.device.createCommandEncoder({ label: "Render command encoder" });
@@ -386,7 +431,223 @@ type DebugStats = {
   simulationEncodeMs: number;
 };
 
-function bindControls(settings: SimulationSettings): ControlBindings {
+type VehicleController = {
+  setWheels: (leftWheelBodyId: number, rightWheelBodyId: number) => void;
+  clear: () => void;
+  getMotorStrength: (bodyId: number | undefined) => number | undefined;
+  setMotorStrength: (bodyId: number | undefined, motorStrength: number) => void;
+  updateMotors: (device: GPUDevice, particles: ParticleBuffers, bodyBuffer: GPUBuffer) => void;
+};
+
+function createVehicleController(): VehicleController {
+  const defaultMotorStrength = 88;
+  const keys = new Set<string>();
+  const motorStrengths = new Map<number, number>();
+  let leftWheelBodyId: number | undefined;
+  let rightWheelBodyId: number | undefined;
+
+  window.addEventListener("keydown", (event) => {
+    if (event.code === "KeyA" || event.code === "KeyD") {
+      keys.add(event.code);
+    }
+  });
+
+  window.addEventListener("keyup", (event) => {
+    if (event.code === "KeyA" || event.code === "KeyD") {
+      keys.delete(event.code);
+    }
+  });
+
+  return {
+    setWheels(left, right) {
+      leftWheelBodyId = left;
+      rightWheelBodyId = right;
+      motorStrengths.set(left, defaultMotorStrength);
+      motorStrengths.set(right, defaultMotorStrength);
+    },
+    clear() {
+      leftWheelBodyId = undefined;
+      rightWheelBodyId = undefined;
+      keys.clear();
+      motorStrengths.clear();
+    },
+    getMotorStrength(bodyId) {
+      return bodyId === undefined ? undefined : motorStrengths.get(bodyId);
+    },
+    setMotorStrength(bodyId, motorStrength) {
+      if (bodyId === undefined || !motorStrengths.has(bodyId)) {
+        return;
+      }
+
+      motorStrengths.set(bodyId, Math.max(0, motorStrength));
+    },
+    updateMotors(device, particles, bodyBuffer) {
+      const driveAxis = (keys.has("KeyD") ? 1 : 0) - (keys.has("KeyA") ? 1 : 0);
+      const targetAngularVelocity = driveAxis * 18;
+
+      if (leftWheelBodyId !== undefined) {
+        const motorStrength = driveAxis === 0 ? 0 : (motorStrengths.get(leftWheelBodyId) ?? defaultMotorStrength);
+        particles.updateBodyMotor(device, bodyBuffer, leftWheelBodyId, targetAngularVelocity, motorStrength);
+      }
+      if (rightWheelBodyId !== undefined) {
+        const motorStrength = driveAxis === 0 ? 0 : (motorStrengths.get(rightWheelBodyId) ?? defaultMotorStrength);
+        particles.updateBodyMotor(device, bodyBuffer, rightWheelBodyId, targetAngularVelocity, motorStrength);
+      }
+    }
+  };
+}
+
+function addVehicleScene(
+  device: GPUDevice,
+  particles: ParticleBuffers,
+  bodyBuffer: GPUBuffer,
+  bondBuffer: GPUBuffer,
+  restShapeBuffer: GPUBuffer,
+  jointBuffer: GPUBuffer,
+  worldSize: { width: number; height: number },
+  settings: SimulationSettings,
+  bodyProperties: BodyProperties[],
+  bodyRenderInfos: BodyRenderInfo[],
+  vehicle: VehicleController
+) {
+  const centerX = worldSize.width > 620 ? Math.max(370, worldSize.width * 0.5) : worldSize.width * 0.5;
+  const wheelOffset = worldSize.width > 520 ? 74 : 54;
+  const wheelSize = worldSize.width > 520 ? 72 : 58;
+  const chassisSize = worldSize.width > 520 ? 132 : 104;
+  const wheelCenterY = Math.max(120, worldSize.height - wheelSize * 0.82);
+  const axleY = wheelCenterY;
+  const chassisCenterY = axleY - wheelSize * 0.78;
+  const chassisAnchorY = axleY - chassisCenterY;
+  const vehicleParticleRadius = 8;
+  const defaultBodyProperties = {
+    softBodyStrength: settings.softBodyStrength,
+    viscosity: settings.viscosity,
+    friction: settings.friction
+  };
+
+  const chassis = addSceneBody(
+    device,
+    particles,
+    bodyBuffer,
+    bondBuffer,
+    restShapeBuffer,
+    "rectangle",
+    chassisSize,
+    vehicleParticleRadius,
+    defaultBodyProperties,
+    worldSize,
+    { x: centerX, y: chassisCenterY },
+    bodyProperties,
+    bodyRenderInfos
+  );
+  const leftWheel = addSceneBody(
+    device,
+    particles,
+    bodyBuffer,
+    bondBuffer,
+    restShapeBuffer,
+    "circle",
+    wheelSize,
+    vehicleParticleRadius,
+    defaultBodyProperties,
+    worldSize,
+    { x: centerX - wheelOffset, y: wheelCenterY },
+    bodyProperties,
+    bodyRenderInfos
+  );
+  const rightWheel = addSceneBody(
+    device,
+    particles,
+    bodyBuffer,
+    bondBuffer,
+    restShapeBuffer,
+    "circle",
+    wheelSize,
+    vehicleParticleRadius,
+    defaultBodyProperties,
+    worldSize,
+    { x: centerX + wheelOffset, y: wheelCenterY },
+    bodyProperties,
+    bodyRenderInfos
+  );
+
+  if (!chassis || !leftWheel || !rightWheel) {
+    const jointCount = writeJointBuffer(device, jointBuffer, []);
+    return { joints: [], jointCount };
+  }
+
+  vehicle.setWheels(leftWheel.bodyId, rightWheel.bodyId);
+  const joints: JointDefinition[] = [
+    {
+      bodyA: chassis.bodyId,
+      bodyB: leftWheel.bodyId,
+      localAnchorA: { x: -wheelOffset, y: chassisAnchorY },
+      localAnchorB: { x: 0, y: 0 },
+      restLength: 0,
+      stiffness: 0.78,
+      influenceRadius: wheelOffset * 0.92
+    },
+    {
+      bodyA: chassis.bodyId,
+      bodyB: rightWheel.bodyId,
+      localAnchorA: { x: wheelOffset, y: chassisAnchorY },
+      localAnchorB: { x: 0, y: 0 },
+      restLength: 0,
+      stiffness: 0.78,
+      influenceRadius: wheelOffset * 0.92
+    }
+  ];
+
+  const jointCount = writeJointBuffer(device, jointBuffer, joints);
+  return { joints, jointCount };
+}
+
+function addSceneBody(
+  device: GPUDevice,
+  particles: ParticleBuffers,
+  bodyBuffer: GPUBuffer,
+  bondBuffer: GPUBuffer,
+  restShapeBuffer: GPUBuffer,
+  shape: SoftBodyShape,
+  size: number,
+  particleRadius: number,
+  properties: BodyProperties,
+  worldSize: { width: number; height: number },
+  center: { x: number; y: number },
+  bodyProperties: BodyProperties[],
+  bodyRenderInfos: BodyRenderInfo[]
+) {
+  const result = particles.addSoftBody(
+    device,
+    bodyBuffer,
+    bondBuffer,
+    restShapeBuffer,
+    shape,
+    size,
+    particleRadius,
+    properties,
+    worldSize.width,
+    worldSize.height,
+    center
+  );
+
+  if (!result.added) {
+    return undefined;
+  }
+
+  bodyProperties[result.bodyId] = { ...properties };
+  bodyRenderInfos.push({
+    bodyId: result.bodyId,
+    startIndex: result.startIndex,
+    perimeterParticleCount: result.perimeterParticleCount,
+    particleRadius: result.particleRadius,
+    materialId: result.materialId
+  });
+
+  return result;
+}
+
+function bindControls(settings: SimulationSettings, vehicle: VehicleController): ControlBindings {
   const bodyShape = getSelect("body-shape");
   const renderMode = getSelect("render-mode");
   const bodySize = getInput("body-size");
@@ -410,6 +671,9 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   const viscosityOutput = getOutput("viscosity-output");
   const friction = getInput("friction");
   const frictionOutput = getOutput("friction-output");
+  const motorStrengthControl = getElement("motor-strength-control");
+  const motorStrength = getInput("motor-strength");
+  const motorStrengthOutput = getOutput("motor-strength-output");
   const wallBounce = getInput("wall-bounce");
   const wallBounceOutput = getOutput("wall-bounce-output");
   const mouseForce = getInput("mouse-force");
@@ -447,11 +711,17 @@ function bindControls(settings: SimulationSettings): ControlBindings {
         softBodyStrength.value = String(spawnBodyProperties.softBodyStrength);
         viscosity.value = String(spawnBodyProperties.viscosity);
         friction.value = String(spawnBodyProperties.friction);
+        motorStrengthControl.hidden = true;
       } else {
         propertyMode.textContent = `Editing body ${selectedBodyId + 1}`;
         softBodyStrength.value = String(selectedBodyProperties.softBodyStrength);
         viscosity.value = String(selectedBodyProperties.viscosity);
         friction.value = String(selectedBodyProperties.friction);
+        const selectedMotorStrength = vehicle.getMotorStrength(selectedBodyId);
+        motorStrengthControl.hidden = selectedMotorStrength === undefined;
+        if (selectedMotorStrength !== undefined) {
+          motorStrength.value = String(selectedMotorStrength);
+        }
       }
       syncingBodyControls = false;
       refresh();
@@ -490,6 +760,7 @@ function bindControls(settings: SimulationSettings): ControlBindings {
     softBodyStrengthOutput.value = getCurrentBodyProperties().softBodyStrength.toFixed(0);
     viscosityOutput.value = getCurrentBodyProperties().viscosity.toFixed(1);
     frictionOutput.value = getCurrentBodyProperties().friction.toFixed(2);
+    motorStrengthOutput.value = motorStrength.valueAsNumber.toFixed(0);
     wallBounceOutput.value = settings.wallBounce.toFixed(2);
     mouseForceOutput.value = settings.mouseForce.toLocaleString();
   };
@@ -548,6 +819,11 @@ function bindControls(settings: SimulationSettings): ControlBindings {
       ...getCurrentBodyProperties(),
       friction: friction.valueAsNumber
     });
+    refresh();
+  });
+
+  motorStrength.addEventListener("input", () => {
+    vehicle.setMotorStrength(selectedBodyId, motorStrength.valueAsNumber);
     refresh();
   });
 
@@ -649,6 +925,19 @@ function encodeSimulationIntegrate(
   simulatePass.end();
 }
 
+function encodeJointSolve(
+  encoder: GPUCommandEncoder,
+  pipelines: Pipelines,
+  particles: ParticleBuffers,
+  particleCount: number
+) {
+  const jointPass = encoder.beginComputePass({ label: "Joint projection pass" });
+  jointPass.setPipeline(pipelines.solveJointsPipeline);
+  jointPass.setBindGroup(0, pipelines.solveJointBindGroups[particles.activeIndex]);
+  jointPass.dispatchWorkgroups(Math.ceil(particleCount / WORKGROUP_SIZE));
+  jointPass.end();
+}
+
 function encodeContactSolve(
   encoder: GPUCommandEncoder,
   pipelines: Pipelines,
@@ -672,6 +961,10 @@ function clampContactIterations(value: number) {
 
 function clampBondIterations(value: number) {
   return Math.min(8, Math.max(1, Math.floor(value || 1)));
+}
+
+function clampJointIterations(value: number) {
+  return Math.min(8, Math.max(0, Math.floor(value || 0)));
 }
 
 function smoothTiming(previous: number, next: number) {

@@ -29,7 +29,10 @@ struct SimParams {
   contactIterations: u32,
   selectedParticleIndex: u32,
   bondIterations: u32,
-  restCellSize: vec2<f32>,
+  jointCount: u32,
+  jointIterations: u32,
+  solverPhase: u32,
+  padding2: vec3<u32>,
 };
 
 struct BodyParams {
@@ -42,6 +45,19 @@ struct BodyParams {
   padding1: f32,
 };
 
+struct Joint {
+  bodyA: u32,
+  bodyB: u32,
+  jointType: u32,
+  enabled: u32,
+  localAnchorA: vec2<f32>,
+  localAnchorB: vec2<f32>,
+  restLength: f32,
+  stiffness: f32,
+  influenceRadius: f32,
+  padding: f32,
+};
+
 @group(0) @binding(0) var<storage, read> particlesIn: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> particlesOut: array<Particle>;
 @group(0) @binding(2) var<uniform> params: SimParams;
@@ -49,8 +65,10 @@ struct BodyParams {
 @group(0) @binding(4) var<storage, read> cellStarts: array<u32>;
 @group(0) @binding(5) var<storage, read> pairValues: array<u32>;
 @group(0) @binding(6) var<storage, read> bodies: array<BodyParams>;
+@group(0) @binding(7) var<storage, read> joints: array<Joint>;
 
 const BODY_ID_MASK: u32 = 0x0000ffffu;
+const MAX_JOINTS: u32 = 64u;
 const CONTACT_SLOP: f32 = 0.015;
 const CONTACT_STIFFNESS: f32 = 0.72;
 const CONTACT_VELOCITY_FEEDBACK: f32 = 0.10;
@@ -142,7 +160,13 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 }
 
 fn contactCorrection(particle: Particle, other: Particle) -> vec2<f32> {
-  if (!particleActive(other) || particleBodyId(particle) == particleBodyId(other)) {
+  if (!particleActive(other)) {
+    return vec2<f32>(0.0);
+  }
+
+  let bodyId = particleBodyId(particle);
+  let otherBodyId = particleBodyId(other);
+  if (bodyId == otherBodyId || bodiesAreJointed(bodyId, otherBodyId)) {
     return vec2<f32>(0.0);
   }
 
@@ -168,6 +192,24 @@ fn contactCorrection(particle: Particle, other: Particle) -> vec2<f32> {
   }
 
   return -normal * penetration * (invMass / invMassSum);
+}
+
+fn bodiesAreJointed(bodyA: u32, bodyB: u32) -> bool {
+  let jointCount = min(params.jointCount, MAX_JOINTS);
+  for (var jointIndex = 0u; jointIndex < jointCount; jointIndex += 1u) {
+    let joint = joints[jointIndex];
+    if (joint.enabled == 0u) {
+      continue;
+    }
+
+    let forwardMatch = joint.bodyA == bodyA && joint.bodyB == bodyB;
+    let reverseMatch = joint.bodyA == bodyB && joint.bodyB == bodyA;
+    if (forwardMatch || reverseMatch) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 fn clampToWorld(position: vec2<f32>, radius: f32) -> vec2<f32> {

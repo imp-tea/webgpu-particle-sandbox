@@ -6,11 +6,13 @@ import {
   DEFAULT_CONFIG,
   GRID_CELL_SIZE,
   GRID_PARTICLE_CAPACITY,
+  JOINT_STRIDE_BYTES,
   MATERIAL_COUNT,
   MATERIAL_STRIDE_BYTES,
   MAX_BODIES,
   MAX_GRID_CELLS,
   MAX_GRID_COLUMNS,
+  MAX_JOINTS,
   MAX_GRID_ROWS,
   MAX_SCAN_GROUPS,
   PARTICLE_STRIDE_BYTES,
@@ -21,7 +23,8 @@ import {
 } from "../config";
 import type { PointerState } from "../input";
 
-export type SoftBodyShape = "square" | "circle" | "triangle";
+export type SoftBodyShape = "square" | "rectangle" | "circle" | "triangle";
+export type BodySpawnPoint = { x: number; y: number };
 
 const BODY_ID_MASK = 0x0000ffff;
 const INVALID_BOND_INDEX = 0xffffffff;
@@ -39,6 +42,13 @@ export type ParticleBuffers = {
     bodyId: number,
     properties: BodyProperties
   ) => void;
+  updateBodyMotor: (
+    device: GPUDevice,
+    bodyBuffer: GPUBuffer,
+    bodyId: number,
+    targetAngularVelocity: number,
+    motorStrength: number
+  ) => void;
   addSoftBody: (
     device: GPUDevice,
     bodyBuffer: GPUBuffer,
@@ -49,7 +59,8 @@ export type ParticleBuffers = {
     particleRadius: number,
     properties: BodyProperties,
     worldWidth: number,
-    worldHeight: number
+    worldHeight: number,
+    spawnPoint?: BodySpawnPoint
   ) => SoftBodyAddResult;
   swap: () => void;
 };
@@ -58,6 +69,16 @@ export type BodyProperties = {
   softBodyStrength: number;
   viscosity: number;
   friction: number;
+};
+
+export type JointDefinition = {
+  bodyA: number;
+  bodyB: number;
+  localAnchorA: BodySpawnPoint;
+  localAnchorB: BodySpawnPoint;
+  restLength: number;
+  stiffness: number;
+  influenceRadius: number;
 };
 
 export type SoftBodyAddResult =
@@ -122,7 +143,30 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
 
       device.queue.writeBuffer(bodyBuffer, bodyId * BODY_STRIDE_BYTES + 16, createBodyPropertiesData(properties));
     },
-    addSoftBody(device, bodyBuffer, bondBuffer, restShapeBuffer, shape, size, particleRadius, properties, worldWidth, worldHeight) {
+    updateBodyMotor(device, bodyBuffer, bodyId, targetAngularVelocity, motorStrength) {
+      if (bodyId < 0 || bodyId >= this.bodyCount) {
+        return;
+      }
+
+      device.queue.writeBuffer(
+        bodyBuffer,
+        bodyId * BODY_STRIDE_BYTES + 8,
+        createBodyMotorData(targetAngularVelocity, motorStrength)
+      );
+    },
+    addSoftBody(
+      device,
+      bodyBuffer,
+      bondBuffer,
+      restShapeBuffer,
+      shape,
+      size,
+      particleRadius,
+      properties,
+      worldWidth,
+      worldHeight,
+      spawnPoint
+    ) {
       if (this.bodyCount >= MAX_BODIES) {
         return { added: false, reason: `Body limit reached (${MAX_BODIES}).` };
       }
@@ -135,7 +179,8 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
         startIndex: this.particleCount,
         properties,
         worldWidth,
-        worldHeight
+        worldHeight,
+        spawnPoint
       });
 
       if (this.particleCount + body.particleCount > this.maxParticles) {
@@ -196,6 +241,14 @@ export function createRestShapeBuffer(device: GPUDevice, maxParticles = DEFAULT_
   return device.createBuffer({
     label: "Soft body rest shape memory",
     size: maxParticles * REST_SHAPE_STRIDE_BYTES,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  });
+}
+
+export function createJointBuffer(device: GPUDevice): GPUBuffer {
+  return device.createBuffer({
+    label: "Body joint constraints",
+    size: MAX_JOINTS * JOINT_STRIDE_BYTES,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
   });
 }
@@ -308,7 +361,9 @@ export function writeSimParams(
   pointer: PointerState,
   worldWidth: number,
   worldHeight: number,
-  deltaTime: number
+  deltaTime: number,
+  jointCount = 0,
+  solverPhase = 0
 ) {
   const data = new ArrayBuffer(SIM_PARAMS_BYTES);
   const view = new DataView(data);
@@ -338,10 +393,37 @@ export function writeSimParams(
   view.setUint32(76, settings.contactIterations, true);
   view.setUint32(80, pointer.selectedParticleIndex, true);
   view.setUint32(84, settings.bondIterations, true);
-  view.setFloat32(88, 1, true);
-  view.setFloat32(92, 1, true);
+  view.setUint32(88, jointCount, true);
+  view.setUint32(92, settings.jointIterations, true);
+  view.setUint32(96, solverPhase, true);
 
   device.queue.writeBuffer(uniformBuffer, 0, data);
+}
+
+export function writeJointBuffer(device: GPUDevice, jointBuffer: GPUBuffer, joints: JointDefinition[]) {
+  const jointCount = Math.min(MAX_JOINTS, joints.length);
+  const data = new ArrayBuffer(MAX_JOINTS * JOINT_STRIDE_BYTES);
+  const view = new DataView(data);
+
+  for (let index = 0; index < jointCount; index += 1) {
+    const joint = joints[index];
+    const offset = index * JOINT_STRIDE_BYTES;
+    view.setUint32(offset, joint.bodyA, true);
+    view.setUint32(offset + 4, joint.bodyB, true);
+    view.setUint32(offset + 8, 1, true);
+    view.setUint32(offset + 12, 1, true);
+    view.setFloat32(offset + 16, joint.localAnchorA.x, true);
+    view.setFloat32(offset + 20, joint.localAnchorA.y, true);
+    view.setFloat32(offset + 24, joint.localAnchorB.x, true);
+    view.setFloat32(offset + 28, joint.localAnchorB.y, true);
+    view.setFloat32(offset + 32, joint.restLength, true);
+    view.setFloat32(offset + 36, joint.stiffness, true);
+    view.setFloat32(offset + 40, joint.influenceRadius, true);
+    view.setFloat32(offset + 44, 0, true);
+  }
+
+  device.queue.writeBuffer(jointBuffer, 0, data);
+  return jointCount;
 }
 
 type SoftBodyDataOptions = {
@@ -353,6 +435,7 @@ type SoftBodyDataOptions = {
   properties: BodyProperties;
   worldWidth: number;
   worldHeight: number;
+  spawnPoint?: BodySpawnPoint;
 };
 
 function createSoftBodyData(options: SoftBodyDataOptions) {
@@ -369,7 +452,7 @@ function createSoftBodyData(options: SoftBodyDataOptions) {
   const bodyData = new ArrayBuffer(BODY_STRIDE_BYTES);
   const particleView = new DataView(particleData);
   const bodyView = new DataView(bodyData);
-  const center = pickBodyCenter(options.bodyId, size, options.worldWidth, options.worldHeight);
+  const center = options.spawnPoint ?? pickBodyCenter(options.bodyId, size, options.worldWidth, options.worldHeight);
   const radius = Math.max(1, Math.min(8, options.particleRadius));
   const materialId = options.bodyId % MATERIAL_COUNT;
   const bodyId = options.bodyId & BODY_ID_MASK;
@@ -392,6 +475,8 @@ function createSoftBodyData(options: SoftBodyDataOptions) {
 
   bodyView.setUint32(0, options.startIndex, true);
   bodyView.setUint32(4, particleCount, true);
+  bodyView.setFloat32(8, 0, true);
+  bodyView.setFloat32(12, 0, true);
   bodyView.setFloat32(16, options.properties.softBodyStrength, true);
   bodyView.setFloat32(20, options.properties.viscosity, true);
   bodyView.setFloat32(24, options.properties.friction, true);
@@ -416,6 +501,14 @@ function createBodyPropertiesData(properties: BodyProperties) {
   view.setFloat32(0, properties.softBodyStrength, true);
   view.setFloat32(4, properties.viscosity, true);
   view.setFloat32(8, properties.friction, true);
+  return data;
+}
+
+function createBodyMotorData(targetAngularVelocity: number, motorStrength: number) {
+  const data = new ArrayBuffer(8);
+  const view = new DataView(data);
+  view.setFloat32(0, targetAngularVelocity, true);
+  view.setFloat32(4, motorStrength, true);
   return data;
 }
 
@@ -447,6 +540,10 @@ function createRestShapeData(points: BodyPoint[]) {
 }
 
 function createShapePoints(shape: SoftBodyShape, size: number, spacing: number, rng: () => number): BodyPoint[] {
+  if (shape === "rectangle") {
+    return createRectanglePoints(size * 1.78, size * 0.48, spacing, rng);
+  }
+
   const halfSize = size * 0.5;
   const rowSpacing = spacing * Math.sqrt(3) * 0.5;
   const columns = Math.ceil(size / spacing) + 2;
@@ -487,6 +584,47 @@ function createShapePoints(shape: SoftBodyShape, size: number, spacing: number, 
   return points;
 }
 
+function createRectanglePoints(width: number, height: number, spacing: number, rng: () => number): BodyPoint[] {
+  const halfWidth = width * 0.5;
+  const halfHeight = height * 0.5;
+  const rowSpacing = spacing * Math.sqrt(3) * 0.5;
+  const columns = Math.ceil(width / spacing) + 2;
+  const rows = Math.ceil(height / rowSpacing) + 2;
+  const outlinePoints = createRectangleOutlinePoints(halfWidth, halfHeight, spacing);
+  const interiorPoints: BodyPoint[] = [];
+  const minInteriorDistanceSq = spacing * spacing * 0.62 * 0.62;
+
+  for (let row = 0; row < rows; row += 1) {
+    const y = (row - (rows - 1) * 0.5) * rowSpacing;
+    const rowOffset = row % 2 === 0 ? 0 : spacing * 0.5;
+
+    for (let column = 0; column < columns; column += 1) {
+      const x = (column - (columns - 1) * 0.5) * spacing + rowOffset;
+      if (Math.abs(x) > halfWidth || Math.abs(y) > halfHeight) {
+        continue;
+      }
+
+      if (isTooCloseToOutline(x, y, outlinePoints, minInteriorDistanceSq)) {
+        continue;
+      }
+
+      interiorPoints.push({
+        x,
+        y,
+        boundary: false
+      });
+    }
+  }
+
+  relaxRectangleInteriorPoints(halfWidth, halfHeight, spacing, outlinePoints, interiorPoints, rng);
+  const points = [...outlinePoints, ...interiorPoints];
+  if (points.length === 0) {
+    points.push({ x: 0, y: 0, boundary: true });
+  }
+
+  return points;
+}
+
 function createOutlinePoints(shape: SoftBodyShape, halfSize: number, spacing: number): BodyPoint[] {
   if (shape === "circle") {
     return createCircleOutlinePoints(halfSize, spacing);
@@ -507,6 +645,18 @@ function createOutlinePoints(shape: SoftBodyShape, halfSize: number, spacing: nu
         ];
 
   return createPolylineOutlinePoints(vertices, spacing);
+}
+
+function createRectangleOutlinePoints(halfWidth: number, halfHeight: number, spacing: number): BodyPoint[] {
+  return createPolylineOutlinePoints(
+    [
+      { x: -halfWidth, y: -halfHeight },
+      { x: halfWidth, y: -halfHeight },
+      { x: halfWidth, y: halfHeight },
+      { x: -halfWidth, y: halfHeight }
+    ],
+    spacing
+  );
 }
 
 function createCircleOutlinePoints(radius: number, spacing: number): BodyPoint[] {
@@ -612,6 +762,49 @@ function relaxInteriorPoints(
 
       point.x = constrained.x;
       point.y = constrained.y;
+    }
+  }
+}
+
+function relaxRectangleInteriorPoints(
+  halfWidth: number,
+  halfHeight: number,
+  spacing: number,
+  outlinePoints: BodyPoint[],
+  interiorPoints: BodyPoint[],
+  rng: () => number
+) {
+  const iterations = 8;
+  const minDistance = spacing * 0.82;
+  const minDistanceSq = minDistance * minDistance;
+  const maxStep = spacing * 0.18;
+
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    const deltas = interiorPoints.map(() => ({ x: 0, y: 0 }));
+
+    for (let i = 0; i < interiorPoints.length; i += 1) {
+      accumulateSpacingDelta(interiorPoints[i], outlinePoints, minDistanceSq, deltas[i]);
+
+      for (let j = i + 1; j < interiorPoints.length; j += 1) {
+        const delta = getRepulsionDelta(interiorPoints[i], interiorPoints[j], minDistanceSq, rng);
+        deltas[i].x += delta.x;
+        deltas[i].y += delta.y;
+        deltas[j].x -= delta.x;
+        deltas[j].y -= delta.y;
+      }
+    }
+
+    for (let i = 0; i < interiorPoints.length; i += 1) {
+      const point = interiorPoints[i];
+      const delta = deltas[i];
+      const length = Math.hypot(delta.x, delta.y);
+      if (length <= 0.000001) {
+        continue;
+      }
+
+      const step = Math.min(maxStep, length);
+      point.x = Math.max(-halfWidth, Math.min(halfWidth, point.x + (delta.x / length) * step));
+      point.y = Math.max(-halfHeight, Math.min(halfHeight, point.y + (delta.y / length) * step));
     }
   }
 }
