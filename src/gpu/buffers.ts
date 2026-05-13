@@ -14,6 +14,7 @@ import {
   MAX_GRID_ROWS,
   MAX_SCAN_GROUPS,
   PARTICLE_STRIDE_BYTES,
+  REST_SHAPE_STRIDE_BYTES,
   SCAN_BLOCK_SIZE,
   SIM_PARAMS_BYTES,
   type SimulationSettings
@@ -31,11 +32,12 @@ export type ParticleBuffers = {
   maxParticles: number;
   particleCount: number;
   bodyCount: number;
-  clear: (device: GPUDevice, bodyBuffer: GPUBuffer, bondBuffer: GPUBuffer) => void;
+  clear: (device: GPUDevice, bodyBuffer: GPUBuffer, bondBuffer: GPUBuffer, restShapeBuffer: GPUBuffer) => void;
   addSoftBody: (
     device: GPUDevice,
     bodyBuffer: GPUBuffer,
     bondBuffer: GPUBuffer,
+    restShapeBuffer: GPUBuffer,
     shape: SoftBodyShape,
     size: number,
     particleRadius: number,
@@ -87,14 +89,15 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
     maxParticles,
     particleCount: 0,
     bodyCount: 0,
-    clear(device, bodyBuffer, bondBuffer) {
+    clear(device, bodyBuffer, bondBuffer, restShapeBuffer) {
       this.particleCount = 0;
       this.bodyCount = 0;
       this.activeIndex = 0;
       device.queue.writeBuffer(bodyBuffer, 0, new ArrayBuffer(MAX_BODIES * BODY_STRIDE_BYTES));
       device.queue.writeBuffer(bondBuffer, 0, createEmptyBondData(this.maxParticles));
+      device.queue.writeBuffer(restShapeBuffer, 0, new ArrayBuffer(this.maxParticles * REST_SHAPE_STRIDE_BYTES));
     },
-    addSoftBody(device, bodyBuffer, bondBuffer, shape, size, particleRadius, worldWidth, worldHeight) {
+    addSoftBody(device, bodyBuffer, bondBuffer, restShapeBuffer, shape, size, particleRadius, worldWidth, worldHeight) {
       if (this.bodyCount >= MAX_BODIES) {
         return { added: false, reason: `Body limit reached (${MAX_BODIES}).` };
       }
@@ -122,6 +125,7 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
         this.particleCount * BOND_SLOT_COUNT * BOND_STRIDE_BYTES,
         body.bondData
       );
+      device.queue.writeBuffer(restShapeBuffer, this.particleCount * REST_SHAPE_STRIDE_BYTES, body.restShapeData);
 
       this.particleCount += body.particleCount;
       this.bodyCount += 1;
@@ -155,6 +159,14 @@ export function createBondBuffer(device: GPUDevice, maxParticles = DEFAULT_CONFI
 
   device.queue.writeBuffer(bondBuffer, 0, createEmptyBondData(maxParticles));
   return bondBuffer;
+}
+
+export function createRestShapeBuffer(device: GPUDevice, maxParticles = DEFAULT_CONFIG.maxParticles): GPUBuffer {
+  return device.createBuffer({
+    label: "Soft body rest shape memory",
+    size: maxParticles * REST_SHAPE_STRIDE_BYTES,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  });
 }
 
 export function createUniformBuffer(device: GPUDevice): GPUBuffer {
@@ -320,6 +332,7 @@ function createSoftBodyData(options: SoftBodyDataOptions) {
   const particleCount = points.length;
   const particleData = new ArrayBuffer(particleCount * PARTICLE_STRIDE_BYTES);
   const bondData = createBondData(points, options.startIndex, spacing);
+  const restShapeData = createRestShapeData(points);
   const bodyData = new ArrayBuffer(BODY_STRIDE_BYTES);
   const particleView = new DataView(particleData);
   const bodyView = new DataView(bodyData);
@@ -347,7 +360,7 @@ function createSoftBodyData(options: SoftBodyDataOptions) {
   bodyView.setUint32(0, options.startIndex, true);
   bodyView.setUint32(4, particleCount, true);
 
-  return { particleData, bodyData, bondData, particleCount };
+  return { particleData, bodyData, bondData, restShapeData, particleCount };
 }
 
 type BodyPoint = {
@@ -361,6 +374,21 @@ type BondNeighbor = {
   restLength: number;
   weight: number;
 };
+
+function createRestShapeData(points: BodyPoint[]) {
+  const data = new ArrayBuffer(points.length * REST_SHAPE_STRIDE_BYTES);
+  const view = new DataView(data);
+
+  for (let i = 0; i < points.length; i += 1) {
+    const point = points[i];
+    const offset = i * REST_SHAPE_STRIDE_BYTES;
+    view.setFloat32(offset, point.x, true);
+    view.setFloat32(offset + 4, point.y, true);
+    view.setFloat32(offset + 8, point.boundary ? 1 : 0.18, true);
+  }
+
+  return data;
+}
 
 function createShapePoints(shape: SoftBodyShape, size: number, spacing: number, rng: () => number): BodyPoint[] {
   const halfSize = size * 0.5;

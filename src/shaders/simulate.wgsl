@@ -46,15 +46,23 @@ struct Bond {
   padding: f32,
 };
 
+struct RestShape {
+  localPosition: vec2<f32>,
+  weight: f32,
+  padding: f32,
+};
+
 @group(0) @binding(0) var<storage, read> particlesIn: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> particlesOut: array<Particle>;
 @group(0) @binding(2) var<uniform> params: SimParams;
 @group(0) @binding(3) var<storage, read> bodies: array<BodyParams>;
 @group(0) @binding(4) var<storage, read> bonds: array<Bond>;
+@group(0) @binding(5) var<storage, read> restShapes: array<RestShape>;
 
 const BODY_ID_MASK: u32 = 0x0000ffffu;
 const BOND_SLOT_COUNT: u32 = 8u;
 const INVALID_BOND_INDEX: u32 = 0xffffffffu;
+const SHAPE_MATCH_SAMPLE_COUNT: u32 = 24u;
 
 // Integrates particles from a source state buffer into a destination state buffer.
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -93,6 +101,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
   var position = particle.position + velocity * params.deltaTime;
   position = relaxSoftBodyPosition(index, position);
+  position = applyShapeMemory(index, position);
 
   if (params.deltaTime > 0.000001) {
     velocity = (position - particle.position) / params.deltaTime;
@@ -158,6 +167,84 @@ fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> 
   }
 
   return position;
+}
+
+fn applyShapeMemory(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> {
+  if (params.deltaTime <= 0.000001) {
+    return predictedPosition;
+  }
+
+  let bodyId = particleBodyId(particlesIn[index]);
+  let body = bodies[bodyId];
+  if (body.particleCount < 2u || index < body.startIndex) {
+    return predictedPosition;
+  }
+
+  let localIndex = index - body.startIndex;
+  if (localIndex >= body.particleCount) {
+    return predictedPosition;
+  }
+
+  let restShape = restShapes[index];
+  if (restShape.weight <= 0.0) {
+    return predictedPosition;
+  }
+
+  let sampleCount = min(body.particleCount, SHAPE_MATCH_SAMPLE_COUNT);
+  var restCenter = vec2<f32>(0.0);
+  var currentCenter = vec2<f32>(0.0);
+  var validSamples = 0.0;
+
+  for (var sample = 0u; sample < sampleCount; sample += 1u) {
+    let sampleLocalIndex = min(body.particleCount - 1u, (sample * body.particleCount) / sampleCount);
+    let sampleIndex = body.startIndex + sampleLocalIndex;
+    let particle = particlesIn[sampleIndex];
+    if (particleActive(particle) && particleBodyId(particle) == bodyId) {
+      restCenter += restShapes[sampleIndex].localPosition;
+      currentCenter += particle.position + particle.velocity * params.deltaTime;
+      validSamples += 1.0;
+    }
+  }
+
+  if (validSamples <= 1.0) {
+    return predictedPosition;
+  }
+
+  restCenter /= validSamples;
+  currentCenter /= validSamples;
+
+  var cosineSum = 0.0;
+  var sineSum = 0.0;
+
+  for (var sample = 0u; sample < sampleCount; sample += 1u) {
+    let sampleLocalIndex = min(body.particleCount - 1u, (sample * body.particleCount) / sampleCount);
+    let sampleIndex = body.startIndex + sampleLocalIndex;
+    let particle = particlesIn[sampleIndex];
+    if (particleActive(particle) && particleBodyId(particle) == bodyId) {
+      let restDelta = restShapes[sampleIndex].localPosition - restCenter;
+      let currentDelta = particle.position + particle.velocity * params.deltaTime - currentCenter;
+      cosineSum += dot(restDelta, currentDelta);
+      sineSum += restDelta.x * currentDelta.y - restDelta.y * currentDelta.x;
+    }
+  }
+
+  let rotationLength = sqrt(cosineSum * cosineSum + sineSum * sineSum);
+  if (rotationLength <= 0.000001) {
+    return predictedPosition;
+  }
+
+  let rotation = vec2<f32>(cosineSum, sineSum) / rotationLength;
+  let localTarget = restShape.localPosition - restCenter;
+  let rotatedTarget = vec2<f32>(
+    rotation.x * localTarget.x - rotation.y * localTarget.y,
+    rotation.y * localTarget.x + rotation.x * localTarget.y
+  );
+  let targetPosition = currentCenter + rotatedTarget;
+  let frameStrength = 0.18;
+  let stepStrength = 1.0 - pow(1.0 - frameStrength, clamp(params.deltaTime * 60.0, 0.0, 1.0));
+  let weightedStrength = clamp(stepStrength * restShape.weight, 0.0, 0.35);
+
+  return predictedPosition + (targetPosition - predictedPosition) * weightedStrength;
 }
 
 struct VelocitySample {

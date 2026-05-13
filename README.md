@@ -108,6 +108,14 @@ weight:      f32
 padding:     f32
 ```
 
+Rest-shape layout is 16 bytes per particle:
+
+```text
+local pos:   vec2<f32>
+weight:      f32  perimeter particles use stronger restore
+padding:     f32
+```
+
 Color layout is 16 bytes:
 
 ```text
@@ -121,6 +129,7 @@ CPU code only creates or clears particle, body, and bond data when the user adds
 - Same-body particles preserve local soft-body shape through explicit per-particle neighbor bonds.
 - Different bodies interact through the contact projection pass.
 - Spawned bodies use shape-specific point sets for squares, circles, and triangles. Squares and triangles emit exact corner particles and evenly spaced edge particles first; circles emit evenly spaced particles exactly on the circumference. The interior starts from a hexagonal fill, rejects candidates too close to the fixed outline particles, then runs a few CPU-side spacing relaxation passes before each particle builds up to 8 nearby neighbor bonds. Boundary-to-boundary bonds receive a modestly higher weight.
+- A low-strength shape-memory correction samples each body's current transform and nudges particles toward their rest-local positions under that transform. Perimeter particles receive the strongest correction so collapsed outlines can spring back without making the whole body rigid.
 - Elasticity scales the explicit bond solve. Set it to `0` to return toward particle-fluid behavior.
 - Bond iterations repeat the local shape solve inside each integration pass. Raise this for stiffer, less fabric-like bodies.
 - Contact iterations run separate cross-body overlap projection passes. Raise this when bodies visibly interpenetrate.

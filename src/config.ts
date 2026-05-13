@@ -4,6 +4,7 @@ export const PARTICLE_STRIDE_BYTES = 32;
 export const BODY_STRIDE_BYTES = 32;
 export const BOND_SLOT_COUNT = 8;
 export const BOND_STRIDE_BYTES = 16;
+export const REST_SHAPE_STRIDE_BYTES = 16;
 export const MATERIAL_COUNT = 4;
 export const MATERIAL_STRIDE_BYTES = 16;
 export const SIM_PARAMS_BYTES = 96;
