@@ -240,11 +240,33 @@ fn applyShapeMemory(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> {
     rotation.y * localTarget.x + rotation.x * localTarget.y
   );
   let targetPosition = currentCenter + rotatedTarget;
+  let correction = targetPosition - predictedPosition;
+  let correctionDistance = length(correction);
+  if (correctionDistance <= 0.000001) {
+    return predictedPosition;
+  }
+
+  let sourceParticle = particlesIn[index];
+  let deformationGate = smoothstep(sourceParticle.radius * 0.25, sourceParticle.radius * 1.4, correctionDistance);
+  if (deformationGate <= 0.000001) {
+    return predictedPosition;
+  }
+
+  let wallClearance = min(
+    min(predictedPosition.x - sourceParticle.radius, params.worldSize.x - sourceParticle.radius - predictedPosition.x),
+    min(predictedPosition.y - sourceParticle.radius, params.worldSize.y - sourceParticle.radius - predictedPosition.y)
+  );
+  let wallFactor = mix(0.45, 1.0, smoothstep(0.0, sourceParticle.radius * 3.0, wallClearance));
+  let speedFactor = mix(0.6, 1.0, smoothstep(10.0, 90.0, length(sourceParticle.velocity)));
+  let contactQuietFactor = min(wallFactor * speedFactor, 1.0);
+  let maxCorrection = mix(sourceParticle.radius * 0.08, sourceParticle.radius * 0.22, deformationGate) *
+    clamp(params.deltaTime * 60.0, 0.25, 1.0);
   let frameStrength = 0.18;
   let stepStrength = 1.0 - pow(1.0 - frameStrength, clamp(params.deltaTime * 60.0, 0.0, 1.0));
-  let weightedStrength = clamp(stepStrength * restShape.weight, 0.0, 0.35);
+  let weightedStrength = clamp(stepStrength * restShape.weight * deformationGate * contactQuietFactor, 0.0, 0.28);
+  let correctionStep = min(correctionDistance * weightedStrength, maxCorrection);
 
-  return predictedPosition + (targetPosition - predictedPosition) * weightedStrength;
+  return predictedPosition + correction / correctionDistance * correctionStep;
 }
 
 struct VelocitySample {
