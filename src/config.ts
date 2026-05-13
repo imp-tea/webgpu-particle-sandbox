@@ -27,7 +27,9 @@ export const DEFAULT_CONFIG = {
   bondIterations: 8,
   softBodyStrength: 2_600,
   viscosity: 4,
+  friction: 0.18,
   mouseForce: 180_000,
+  wallBounce: 0.42,
   maxSpeed: 1_500
 } as const;
 
@@ -40,7 +42,9 @@ export type SimulationSettings = {
   bondIterations: number;
   softBodyStrength: number;
   viscosity: number;
+  friction: number;
   mouseForce: number;
+  wallBounce: number;
   maxSpeed: number;
 };
 
@@ -54,7 +58,9 @@ export function defaultSettings(): SimulationSettings {
     bondIterations: DEFAULT_CONFIG.bondIterations,
     softBodyStrength: DEFAULT_CONFIG.softBodyStrength,
     viscosity: DEFAULT_CONFIG.viscosity,
+    friction: DEFAULT_CONFIG.friction,
     mouseForce: DEFAULT_CONFIG.mouseForce,
+    wallBounce: DEFAULT_CONFIG.wallBounce,
     maxSpeed: DEFAULT_CONFIG.maxSpeed
   };
 }

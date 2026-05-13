@@ -33,6 +33,12 @@ export type ParticleBuffers = {
   particleCount: number;
   bodyCount: number;
   clear: (device: GPUDevice, bodyBuffer: GPUBuffer, bondBuffer: GPUBuffer, restShapeBuffer: GPUBuffer) => void;
+  updateBodyProperties: (
+    device: GPUDevice,
+    bodyBuffer: GPUBuffer,
+    bodyId: number,
+    properties: BodyProperties
+  ) => void;
   addSoftBody: (
     device: GPUDevice,
     bodyBuffer: GPUBuffer,
@@ -41,10 +47,17 @@ export type ParticleBuffers = {
     shape: SoftBodyShape,
     size: number,
     particleRadius: number,
+    properties: BodyProperties,
     worldWidth: number,
     worldHeight: number
   ) => SoftBodyAddResult;
   swap: () => void;
+};
+
+export type BodyProperties = {
+  softBodyStrength: number;
+  viscosity: number;
+  friction: number;
 };
 
 export type SoftBodyAddResult =
@@ -53,6 +66,11 @@ export type SoftBodyAddResult =
       particleCount: number;
       bodyCount: number;
       addedParticles: number;
+      bodyId: number;
+      startIndex: number;
+      perimeterParticleCount: number;
+      particleRadius: number;
+      materialId: number;
     }
   | {
       added: false;
@@ -77,7 +95,7 @@ export type GridBuffers = {
 
 export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_CONFIG.maxParticles): ParticleBuffers {
   const bufferSize = maxParticles * PARTICLE_STRIDE_BYTES;
-  const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const buffers: [GPUBuffer, GPUBuffer] = [
     device.createBuffer({ label: "Particles A", size: bufferSize, usage }),
     device.createBuffer({ label: "Particles B", size: bufferSize, usage })
@@ -97,7 +115,14 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
       device.queue.writeBuffer(bondBuffer, 0, createEmptyBondData(this.maxParticles));
       device.queue.writeBuffer(restShapeBuffer, 0, new ArrayBuffer(this.maxParticles * REST_SHAPE_STRIDE_BYTES));
     },
-    addSoftBody(device, bodyBuffer, bondBuffer, restShapeBuffer, shape, size, particleRadius, worldWidth, worldHeight) {
+    updateBodyProperties(device, bodyBuffer, bodyId, properties) {
+      if (bodyId < 0 || bodyId >= this.bodyCount) {
+        return;
+      }
+
+      device.queue.writeBuffer(bodyBuffer, bodyId * BODY_STRIDE_BYTES + 16, createBodyPropertiesData(properties));
+    },
+    addSoftBody(device, bodyBuffer, bondBuffer, restShapeBuffer, shape, size, particleRadius, properties, worldWidth, worldHeight) {
       if (this.bodyCount >= MAX_BODIES) {
         return { added: false, reason: `Body limit reached (${MAX_BODIES}).` };
       }
@@ -108,6 +133,7 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
         particleRadius,
         bodyId: this.bodyCount,
         startIndex: this.particleCount,
+        properties,
         worldWidth,
         worldHeight
       });
@@ -133,7 +159,12 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
         added: true,
         particleCount: this.particleCount,
         bodyCount: this.bodyCount,
-        addedParticles: body.particleCount
+        addedParticles: body.particleCount,
+        bodyId: body.bodyId,
+        startIndex: body.startIndex,
+        perimeterParticleCount: body.perimeterParticleCount,
+        particleRadius: body.particleRadius,
+        materialId: body.materialId
       };
     },
     swap() {
@@ -282,7 +313,7 @@ export function writeSimParams(
   const data = new ArrayBuffer(SIM_PARAMS_BYTES);
   const view = new DataView(data);
 
-  const signedMouseForce = pointer.active ? pointer.forceSign * settings.mouseForce : 0;
+  const dragForce = pointer.active && pointer.selectedParticleIndex !== 0xffffffff ? settings.mouseForce : 0;
   const grid = getGridDimensions(worldWidth, worldHeight);
 
   view.setFloat32(0, 0, true);
@@ -291,11 +322,11 @@ export function writeSimParams(
   view.setFloat32(12, worldHeight, true);
   view.setFloat32(16, pointer.x, true);
   view.setFloat32(20, pointer.y, true);
-  view.setFloat32(24, signedMouseForce, true);
+  view.setFloat32(24, dragForce, true);
   view.setFloat32(28, deltaTime, true);
   view.setFloat32(32, settings.damping, true);
   view.setUint32(36, settings.particleCount, true);
-  view.setFloat32(40, 0, true);
+  view.setFloat32(40, settings.wallBounce, true);
   view.setFloat32(44, settings.maxSpeed, true);
   view.setFloat32(48, grid.cellSize, true);
   view.setUint32(52, grid.columns, true);
@@ -305,7 +336,7 @@ export function writeSimParams(
   view.setFloat32(68, settings.softBodyStrength, true);
   view.setFloat32(72, settings.viscosity, true);
   view.setUint32(76, settings.contactIterations, true);
-  view.setUint32(80, 0, true);
+  view.setUint32(80, pointer.selectedParticleIndex, true);
   view.setUint32(84, settings.bondIterations, true);
   view.setFloat32(88, 1, true);
   view.setFloat32(92, 1, true);
@@ -319,6 +350,7 @@ type SoftBodyDataOptions = {
   particleRadius: number;
   bodyId: number;
   startIndex: number;
+  properties: BodyProperties;
   worldWidth: number;
   worldHeight: number;
 };
@@ -330,6 +362,7 @@ function createSoftBodyData(options: SoftBodyDataOptions) {
   const rng = mulberry32(0x5eed1234 + options.bodyId * 0x9e3779b9);
   const points = createShapePoints(options.shape, size, spacing, rng);
   const particleCount = points.length;
+  const perimeterParticleCount = points.findIndex((point) => !point.boundary);
   const particleData = new ArrayBuffer(particleCount * PARTICLE_STRIDE_BYTES);
   const bondData = createBondData(points, options.startIndex, spacing);
   const restShapeData = createRestShapeData(points);
@@ -359,8 +392,31 @@ function createSoftBodyData(options: SoftBodyDataOptions) {
 
   bodyView.setUint32(0, options.startIndex, true);
   bodyView.setUint32(4, particleCount, true);
+  bodyView.setFloat32(16, options.properties.softBodyStrength, true);
+  bodyView.setFloat32(20, options.properties.viscosity, true);
+  bodyView.setFloat32(24, options.properties.friction, true);
 
-  return { particleData, bodyData, bondData, restShapeData, particleCount };
+  return {
+    particleData,
+    bodyData,
+    bondData,
+    restShapeData,
+    particleCount,
+    perimeterParticleCount: perimeterParticleCount === -1 ? particleCount : perimeterParticleCount,
+    particleRadius: radius,
+    materialId,
+    bodyId: options.bodyId,
+    startIndex: options.startIndex
+  };
+}
+
+function createBodyPropertiesData(properties: BodyProperties) {
+  const data = new ArrayBuffer(12);
+  const view = new DataView(data);
+  view.setFloat32(0, properties.softBodyStrength, true);
+  view.setFloat32(4, properties.viscosity, true);
+  view.setFloat32(8, properties.friction, true);
+  return data;
 }
 
 type BodyPoint = {

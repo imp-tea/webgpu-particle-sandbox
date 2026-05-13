@@ -271,6 +271,11 @@ export function createPipelines(
         binding: 5,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 6,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
       }
     ]
   });
@@ -600,6 +605,7 @@ export function createPipelines(
       gridBuffers.cellCounts,
       gridBuffers.cellStarts,
       gridBuffers.pairValues,
+      bodyBuffer,
       "A to B"
     ),
     createSolveContactBindGroup(
@@ -611,6 +617,7 @@ export function createPipelines(
       gridBuffers.cellCounts,
       gridBuffers.cellStarts,
       gridBuffers.pairValues,
+      bodyBuffer,
       "B to A"
     )
   ];
@@ -722,6 +729,7 @@ function createSolveContactBindGroup(
   cellCounts: GPUBuffer,
   cellStarts: GPUBuffer,
   pairValues: GPUBuffer,
+  bodyBuffer: GPUBuffer,
   label: string
 ) {
   return device.createBindGroup({
@@ -733,7 +741,8 @@ function createSolveContactBindGroup(
       { binding: 2, resource: { buffer: uniformBuffer } },
       { binding: 3, resource: { buffer: cellCounts } },
       { binding: 4, resource: { buffer: cellStarts } },
-      { binding: 5, resource: { buffer: pairValues } }
+      { binding: 5, resource: { buffer: pairValues } },
+      { binding: 6, resource: { buffer: bodyBuffer } }
     ]
   });
 }

@@ -8,6 +8,8 @@
   <body>
     <main id="app">
       <canvas id="sim-canvas"></canvas>
+      <canvas id="vector-canvas" aria-hidden="true"></canvas>
+      <div id="drag-band" aria-hidden="true"></div>
       <section id="controls" aria-label="Simulation controls">
         <div class="title-row">
           <div>
@@ -27,6 +29,16 @@
             <option value="square">Square</option>
             <option value="circle">Circle</option>
             <option value="triangle">Triangle</option>
+          </select>
+        </label>
+
+        <p id="property-mode">Editing spawn properties</p>
+
+        <label>
+          <span>Render</span>
+          <select id="render-mode">
+            <option value="particles">Particles</option>
+            <option value="vectors">Vectors</option>
           </select>
         </label>
 
@@ -78,7 +90,17 @@
         </label>
 
         <label>
-          <span>Mouse force <output id="mouse-force-output">180000</output></span>
+          <span>Friction <output id="friction-output">0.18</output></span>
+          <input id="friction" type="range" min="0" max="1" step="0.01" value="0.18" />
+        </label>
+
+        <label>
+          <span>Wall bounce <output id="wall-bounce-output">0.42</output></span>
+          <input id="wall-bounce" type="range" min="0" max="0.9" step="0.01" value="0.42" />
+        </label>
+
+        <label>
+          <span>Drag strength <output id="mouse-force-output">180000</output></span>
           <input id="mouse-force" type="range" min="0" max="180000" step="5000" value="180000" />
         </label>
       </section>

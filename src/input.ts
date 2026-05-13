@@ -2,15 +2,20 @@ export type PointerState = {
   x: number;
   y: number;
   active: boolean;
-  forceSign: 1 | -1;
+  selectedParticleIndex: number;
+  selectedBodyId: number;
 };
 
 export class PointerInput {
+  onPointerDown: ((position: { x: number; y: number }) => void) | undefined;
+  onPointerUp: (() => void) | undefined;
+
   readonly state: PointerState = {
     x: 0,
     y: 0,
     active: false,
-    forceSign: 1
+    selectedParticleIndex: 0xffffffff,
+    selectedBodyId: 0xffffffff
   };
 
   constructor(private readonly canvas: HTMLCanvasElement) {
@@ -26,14 +31,13 @@ export class PointerInput {
     this.canvas.setPointerCapture(event.pointerId);
     this.updatePosition(event);
     this.state.active = true;
-    this.state.forceSign = this.pickForceSign(event);
+    this.onPointerDown?.({ x: this.state.x, y: this.state.y });
   };
 
   private readonly handlePointerMove = (event: PointerEvent) => {
     this.updatePosition(event);
     if (event.buttons !== 0) {
       this.state.active = true;
-      this.state.forceSign = this.pickForceSign(event);
     }
   };
 
@@ -43,16 +47,13 @@ export class PointerInput {
     }
     this.updatePosition(event);
     this.state.active = false;
+    this.state.selectedParticleIndex = 0xffffffff;
+    this.onPointerUp?.();
   };
 
   private updatePosition(event: PointerEvent) {
     const rect = this.canvas.getBoundingClientRect();
     this.state.x = event.clientX - rect.left;
     this.state.y = event.clientY - rect.top;
-  }
-
-  private pickForceSign(event: PointerEvent): 1 | -1 {
-    const rightButton = event.button === 2 || (event.buttons & 2) === 2;
-    return rightButton || event.altKey ? -1 : 1;
   }
 }

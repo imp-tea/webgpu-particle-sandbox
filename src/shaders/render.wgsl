@@ -15,7 +15,7 @@ struct RenderParams {
   deltaTime: f32,
   damping: f32,
   particleCount: u32,
-  padding0: f32,
+  wallBounce: f32,
   maxSpeed: f32,
 };
 

@@ -17,7 +17,7 @@ struct SimParams {
   deltaTime: f32,
   damping: f32,
   particleCount: u32,
-  padding0: f32,
+  wallBounce: f32,
   maxSpeed: f32,
   gridCellSize: f32,
   gridColumns: u32,
@@ -27,7 +27,7 @@ struct SimParams {
   softBodyStrength: f32,
   viscosity: f32,
   contactIterations: u32,
-  restRows: u32,
+  selectedParticleIndex: u32,
   bondIterations: u32,
   restCellSize: vec2<f32>,
 };
@@ -36,7 +36,10 @@ struct BodyParams {
   startIndex: u32,
   particleCount: u32,
   padding0: vec2<u32>,
-  padding1: vec4<f32>,
+  softBodyStrength: f32,
+  viscosity: f32,
+  friction: f32,
+  padding1: f32,
 };
 
 struct Bond {
@@ -78,16 +81,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     return;
   }
 
-  var acceleration = params.gravity;
-
-  if (params.mouseForce != 0.0) {
-    let toMouse = params.mousePosition - particle.position;
-    let distanceSq = dot(toMouse, toMouse);
-    if (distanceSq > 1.0) {
-      let distance = sqrt(distanceSq);
-      acceleration += normalize(toMouse) * params.mouseForce / max(distance, 40.0);
-    }
-  }
+  var acceleration = params.gravity + dragAcceleration(index, particle);
 
   var velocity = particle.velocity + acceleration * params.deltaTime;
   velocity *= max(0.0, 1.0 - params.damping * params.deltaTime);
@@ -113,24 +107,30 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     position = particle.position + velocity * params.deltaTime;
   }
 
-  let bounce = 0.72;
+  let body = bodies[particleBodyId(particle)];
+  let bounce = clamp(params.wallBounce, 0.0, 1.0);
+  let wallTangentRetain = clamp(1.0 - body.friction, 0.0, 1.0);
   let r = particle.radius;
 
   if (position.x < r) {
     position.x = r;
     velocity.x = abs(velocity.x) * bounce;
+    velocity.y *= wallTangentRetain;
   }
   if (position.x > params.worldSize.x - r) {
     position.x = params.worldSize.x - r;
     velocity.x = -abs(velocity.x) * bounce;
+    velocity.y *= wallTangentRetain;
   }
   if (position.y < r) {
     position.y = r;
     velocity.y = abs(velocity.y) * bounce;
+    velocity.x *= wallTangentRetain;
   }
   if (position.y > params.worldSize.y - r) {
     position.y = params.worldSize.y - r;
     velocity.y = -abs(velocity.y) * bounce;
+    velocity.x *= wallTangentRetain;
   }
 
   particle.position = position;
@@ -139,12 +139,13 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 }
 
 fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> {
-  if (params.softBodyStrength <= 0.0 || params.bondIterations == 0u) {
+  let bodyId = particleBodyId(particlesIn[index]);
+  let body = bodies[bodyId];
+  let softBodyStrength = body.softBodyStrength;
+  if (softBodyStrength <= 0.0 || params.bondIterations == 0u) {
     return predictedPosition;
   }
 
-  let bodyId = particleBodyId(particlesIn[index]);
-  let body = bodies[bodyId];
   if (body.particleCount == 0u || index < body.startIndex) {
     return predictedPosition;
   }
@@ -155,7 +156,7 @@ fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> 
   }
 
   let iterations = min(params.bondIterations, 8u);
-  let targetStiffness = clamp(params.softBodyStrength / 6000.0, 0.0, 1.0);
+  let targetStiffness = clamp(softBodyStrength / 6000.0, 0.0, 1.0);
   let iterationStiffness = 1.0 - pow(1.0 - targetStiffness, 1.0 / f32(iterations));
   var position = predictedPosition;
 
@@ -167,6 +168,30 @@ fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> 
   }
 
   return position;
+}
+
+fn dragAcceleration(index: u32, particle: Particle) -> vec2<f32> {
+  if (params.mouseForce == 0.0 || params.selectedParticleIndex >= params.particleCount) {
+    return vec2<f32>(0.0);
+  }
+
+  let grabbed = particlesIn[params.selectedParticleIndex];
+  if (!particleActive(grabbed) || particleBodyId(grabbed) != particleBodyId(particle)) {
+    return vec2<f32>(0.0);
+  }
+
+  let dragDelta = params.mousePosition - grabbed.position;
+  if (dot(dragDelta, dragDelta) <= 1.0) {
+    return vec2<f32>(0.0);
+  }
+
+  let distanceFromGrab = distance(particle.position, grabbed.position);
+  let influenceRadius = max(grabbed.radius * 14.0, 96.0);
+  let normalizedDistance = distanceFromGrab / influenceRadius;
+  let falloff = max(0.18, 1.0 / (1.0 + normalizedDistance * normalizedDistance));
+  let selectedBoost = select(1.0, 1.2, index == params.selectedParticleIndex);
+
+  return dragDelta * params.mouseForce * falloff * selectedBoost / max(particle.mass, 0.001);
 }
 
 fn applyShapeMemory(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> {
@@ -275,12 +300,13 @@ struct VelocitySample {
 };
 
 fn dampSoftBodyVelocity(index: u32, velocity: vec2<f32>) -> vec2<f32> {
-  if (params.viscosity <= 0.0 || params.deltaTime <= 0.000001) {
+  let bodyId = particleBodyId(particlesIn[index]);
+  let body = bodies[bodyId];
+  let viscosity = body.viscosity;
+  if (viscosity <= 0.0 || params.deltaTime <= 0.000001) {
     return velocity;
   }
 
-  let bodyId = particleBodyId(particlesIn[index]);
-  let body = bodies[bodyId];
   if (body.particleCount == 0u || index < body.startIndex) {
     return velocity;
   }
@@ -304,7 +330,7 @@ fn dampSoftBodyVelocity(index: u32, velocity: vec2<f32>) -> vec2<f32> {
     return velocity;
   }
 
-  let blend = clamp(params.viscosity * params.deltaTime * 0.18, 0.0, 0.85);
+  let blend = clamp(viscosity * params.deltaTime * 0.18, 0.0, 0.85);
   return velocity + delta / weightSum * blend;
 }
 

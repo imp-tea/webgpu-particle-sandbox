@@ -17,7 +17,7 @@ struct SimParams {
   deltaTime: f32,
   damping: f32,
   particleCount: u32,
-  padding0: f32,
+  wallBounce: f32,
   maxSpeed: f32,
   gridCellSize: f32,
   gridColumns: u32,
@@ -27,9 +27,19 @@ struct SimParams {
   softBodyStrength: f32,
   viscosity: f32,
   contactIterations: u32,
-  padding2: u32,
+  selectedParticleIndex: u32,
   bondIterations: u32,
   restCellSize: vec2<f32>,
+};
+
+struct BodyParams {
+  startIndex: u32,
+  particleCount: u32,
+  padding0: vec2<u32>,
+  softBodyStrength: f32,
+  viscosity: f32,
+  friction: f32,
+  padding1: f32,
 };
 
 @group(0) @binding(0) var<storage, read> particlesIn: array<Particle>;
@@ -38,10 +48,13 @@ struct SimParams {
 @group(0) @binding(3) var<storage, read_write> cellCounts: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read> cellStarts: array<u32>;
 @group(0) @binding(5) var<storage, read> pairValues: array<u32>;
+@group(0) @binding(6) var<storage, read> bodies: array<BodyParams>;
 
 const BODY_ID_MASK: u32 = 0x0000ffffu;
 const CONTACT_SLOP: f32 = 0.015;
-const CONTACT_STIFFNESS: f32 = 0.88;
+const CONTACT_STIFFNESS: f32 = 0.72;
+const CONTACT_VELOCITY_FEEDBACK: f32 = 0.10;
+const CONTACT_NORMAL_DAMPING: f32 = 0.55;
 
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
@@ -57,7 +70,11 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
   }
 
   var correction = vec2<f32>(0.0);
+  var normalSum = vec2<f32>(0.0);
+  var velocityDelta = vec2<f32>(0.0);
+  var frictionSum = 0.0;
   var contactCount = 0u;
+  let bodyFriction = bodies[particleBodyId(particle)].friction;
   let baseCell = vec2<i32>(particleCell(particle.position));
 
   for (var y = -1; y <= 1; y += 1) {
@@ -80,7 +97,14 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
           let other = particlesIn[otherIndex];
           let nextCorrection = contactCorrection(particle, other);
           if (dot(nextCorrection, nextCorrection) > 0.0) {
+            let normal = normalize(nextCorrection);
+            let relativeVelocity = particle.velocity - other.velocity;
+            let approachSpeed = min(dot(relativeVelocity, normal), 0.0);
+            let otherFriction = bodies[particleBodyId(other)].friction;
             correction += nextCorrection;
+            normalSum += normal;
+            velocityDelta += -normal * approachSpeed * CONTACT_NORMAL_DAMPING;
+            frictionSum += sqrt(max(0.0, bodyFriction) * max(0.0, otherFriction));
             contactCount += 1u;
           }
         }
@@ -100,7 +124,16 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     particle.position = clampToWorld(position, particle.radius);
 
     if (params.deltaTime > 0.000001) {
-      particle.velocity += limitedCorrection * CONTACT_STIFFNESS / params.deltaTime;
+      particle.velocity += limitedCorrection * CONTACT_STIFFNESS * CONTACT_VELOCITY_FEEDBACK / params.deltaTime;
+      particle.velocity += velocityDelta / f32(contactCount);
+      let normalLengthSq = dot(normalSum, normalSum);
+      if (normalLengthSq > 0.0001) {
+        let contactNormal = normalSum / sqrt(normalLengthSq);
+        let normalVelocity = contactNormal * dot(particle.velocity, contactNormal);
+        let tangentVelocity = particle.velocity - normalVelocity;
+        let contactFriction = clamp(frictionSum / f32(contactCount), 0.0, 0.95);
+        particle.velocity = normalVelocity + tangentVelocity * (1.0 - contactFriction);
+      }
       particle.velocity = clampVelocity(particle.velocity);
     }
   }

@@ -1,5 +1,5 @@
 import "./style.css";
-import { WORKGROUP_SIZE, defaultSettings, type SimulationSettings } from "./config";
+import { PARTICLE_STRIDE_BYTES, WORKGROUP_SIZE, defaultSettings, type SimulationSettings } from "./config";
 import {
   createBondBuffer,
   createBodyBuffer,
@@ -9,6 +9,7 @@ import {
   createRestShapeBuffer,
   createUniformBuffer,
   getGridDimensions,
+  type BodyProperties,
   type SoftBodyShape,
   writeSimParams,
   type GridBuffers,
@@ -16,25 +17,33 @@ import {
 } from "./gpu/buffers";
 import { initWebGPU } from "./gpu/initWebGPU";
 import { createPipelines, type Pipelines } from "./gpu/pipelines";
-import { PointerInput } from "./input";
+import { PointerInput, type PointerState } from "./input";
 
 const canvasElement = document.querySelector<HTMLCanvasElement>("#sim-canvas");
+const vectorCanvasElement = document.querySelector<HTMLCanvasElement>("#vector-canvas");
 const statusElement = document.querySelector<HTMLElement>("#gpu-status");
 const debugElement = document.querySelector<HTMLElement>("#debug-stats");
+const dragBandElement = document.querySelector<HTMLElement>("#drag-band");
 
-if (!canvasElement || !statusElement || !debugElement) {
+if (!canvasElement || !vectorCanvasElement || !statusElement || !debugElement || !dragBandElement) {
   throw new Error("Missing required DOM nodes.");
 }
 
 const canvas: HTMLCanvasElement = canvasElement;
+const vectorCanvas: HTMLCanvasElement = vectorCanvasElement;
 const statusLabel: HTMLElement = statusElement;
 const debugLabel: HTMLElement = debugElement;
+const dragBand: HTMLElement = dragBandElement;
 
 void start();
 
 async function start() {
   const settings = defaultSettings();
   const ui = bindControls(settings);
+  const vectorContext = vectorCanvas.getContext("2d");
+  if (!vectorContext) {
+    throw new Error("Could not create vector render context.");
+  }
 
   try {
     const gpu = await initWebGPU(canvas);
@@ -46,6 +55,18 @@ async function start() {
     const bodies = createBodyBuffer(gpu.device);
     const bonds = createBondBuffer(gpu.device);
     const restShapes = createRestShapeBuffer(gpu.device);
+    const particlePickReadback = gpu.device.createBuffer({
+      label: "Particle picking readback",
+      size: particles.maxParticles * PARTICLE_STRIDE_BYTES,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const particleSnapshotReadback = gpu.device.createBuffer({
+      label: "Particle snapshot readback",
+      size: particles.maxParticles * PARTICLE_STRIDE_BYTES,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    const bodyProperties: BodyProperties[] = [];
+    const bodyRenderInfos: BodyRenderInfo[] = [];
     const pipelines = createPipelines(
       gpu.device,
       gpu.format,
@@ -70,12 +91,20 @@ async function start() {
 
     ui.onReset = () => {
       particles.clear(gpu.device, bodies, bonds, restShapes);
+      bodyProperties.length = 0;
+      bodyRenderInfos.length = 0;
+      pointer.state.selectedParticleIndex = 0xffffffff;
+      pointer.state.selectedBodyId = 0xffffffff;
+      particleSnapshot = undefined;
+      particleSnapshotCount = 0;
+      ui.setSelectedBody(undefined);
       settings.particleCount = particles.particleCount;
       ui.setBodyStats(particles.bodyCount, particles.particleCount);
     };
 
     ui.onAddBody = (shape, bodySize, particleRadius) => {
       const size = gpu.getWorldSize();
+      const properties = ui.getSpawnBodyProperties();
       const result = particles.addSoftBody(
         gpu.device,
         bodies,
@@ -84,16 +113,88 @@ async function start() {
         shape,
         bodySize,
         particleRadius,
+        properties,
         size.width,
         size.height
       );
       if (result.added) {
+        bodyProperties.push({ ...properties });
+        bodyRenderInfos.push({
+          bodyId: result.bodyId,
+          startIndex: result.startIndex,
+          perimeterParticleCount: result.perimeterParticleCount,
+          particleRadius: result.particleRadius,
+          materialId: result.materialId
+        });
         settings.particleCount = result.particleCount;
         ui.setBodyStats(result.bodyCount, result.particleCount);
         statusLabel.textContent = `Added ${shape} body (${result.addedParticles.toLocaleString()} particles)`;
       } else {
         statusLabel.textContent = result.reason;
       }
+    };
+
+    ui.onBodyPropertiesChange = (bodyId, properties) => {
+      if (bodyId === undefined) {
+        return;
+      }
+
+      bodyProperties[bodyId] = { ...properties };
+      particles.updateBodyProperties(gpu.device, bodies, bodyId, properties);
+    };
+
+    let pickRequestId = 0;
+    let pickingParticle = false;
+    let dragAnchor: { x: number; y: number } | undefined;
+    let particleSnapshot: ArrayBuffer | undefined;
+    let particleSnapshotCount = 0;
+    let particleSnapshotPending = false;
+    let lastParticleSnapshot = 0;
+    pointer.onPointerDown = (position) => {
+      const snapshotPick = pickNearestParticleFromSnapshot(
+        particleSnapshot,
+        particleSnapshotCount,
+        position.x,
+        position.y
+      );
+      if (snapshotPick) {
+        pointer.state.selectedParticleIndex = snapshotPick.particleIndex;
+        pointer.state.selectedBodyId = snapshotPick.bodyId;
+        dragAnchor = { x: snapshotPick.x, y: snapshotPick.y };
+        ui.setSelectedBody(snapshotPick.bodyId, bodyProperties[snapshotPick.bodyId]);
+        return;
+      }
+
+      if (pickingParticle) {
+        return;
+      }
+
+      const requestId = ++pickRequestId;
+      pickingParticle = true;
+      void pickNearestParticle(gpu.device, particles, particlePickReadback, position.x, position.y).then((pick) => {
+        if (requestId !== pickRequestId) {
+          return;
+        }
+
+        if (!pick) {
+          pointer.state.selectedParticleIndex = 0xffffffff;
+          pointer.state.selectedBodyId = 0xffffffff;
+          dragAnchor = undefined;
+          ui.setSelectedBody(undefined);
+          return;
+        }
+
+        pointer.state.selectedParticleIndex = pointer.state.active ? pick.particleIndex : 0xffffffff;
+        pointer.state.selectedBodyId = pick.bodyId;
+        dragAnchor = { x: pick.x, y: pick.y };
+        ui.setSelectedBody(pick.bodyId, bodyProperties[pick.bodyId]);
+      }).finally(() => {
+        pickingParticle = false;
+      });
+    };
+
+    pointer.onPointerUp = () => {
+      dragAnchor = undefined;
     };
 
     let paused = false;
@@ -117,9 +218,31 @@ async function start() {
       const elapsed = Math.min((now - lastTime) / 1000, 1 / 30);
       lastTime = now;
       gpu.resize();
+      resizeVectorCanvas(vectorCanvas, vectorContext);
       const size = gpu.getWorldSize();
       const deltaTime = paused ? 0 : elapsed;
       let simulationEncodeMs = 0;
+      const liveDragAnchor =
+        getParticlePositionFromSnapshot(particleSnapshot, particleSnapshotCount, pointer.state.selectedParticleIndex) ??
+        dragAnchor;
+      updateDragBand(dragBand, liveDragAnchor, pointer.state);
+      const renderingVectors = ui.getRenderMode() === "vectors";
+      const snapshotInterval =
+        pointer.state.active && pointer.state.selectedParticleIndex !== 0xffffffff ? 16 : renderingVectors ? 16 : 80;
+      if (!particleSnapshotPending && settings.particleCount > 0 && now - lastParticleSnapshot > snapshotInterval) {
+        particleSnapshotPending = true;
+        lastParticleSnapshot = now;
+        void readParticleSnapshot(
+          gpu.device,
+          particles,
+          particleSnapshotReadback
+        ).then((snapshot) => {
+          particleSnapshot = snapshot.data;
+          particleSnapshotCount = snapshot.particleCount;
+        }).finally(() => {
+          particleSnapshotPending = false;
+        });
+      }
 
       if (!paused && settings.particleCount > 0) {
         const substeps = clampSubsteps(settings.substeps);
@@ -175,12 +298,15 @@ async function start() {
         ]
       });
 
-      renderPass.setPipeline(pipelines.renderPipeline);
-      renderPass.setBindGroup(0, pipelines.renderBindGroups[particles.activeIndex]);
-      renderPass.draw(6, settings.particleCount);
+      if (!renderingVectors) {
+        renderPass.setPipeline(pipelines.renderPipeline);
+        renderPass.setBindGroup(0, pipelines.renderBindGroups[particles.activeIndex]);
+        renderPass.draw(6, settings.particleCount);
+      }
       renderPass.end();
 
       gpu.device.queue.submit([renderEncoder.finish()]);
+      renderVectorLayer(vectorCanvas, vectorContext, renderingVectors, particleSnapshot, particleSnapshotCount, bodyRenderInfos);
       if (shouldReadDebug) {
         debugReadbackPending = true;
         lastDebugReadback = now;
@@ -232,10 +358,24 @@ async function start() {
 type ControlBindings = {
   onReset: () => void;
   onAddBody: (shape: SoftBodyShape, size: number, particleRadius: number) => void;
+  onBodyPropertiesChange: (bodyId: number | undefined, properties: BodyProperties) => void;
   onPauseToggle: () => void;
+  getRenderMode: () => RenderMode;
+  getSpawnBodyProperties: () => BodyProperties;
+  setSelectedBody: (bodyId: number | undefined, properties?: BodyProperties) => void;
   setPaused: (paused: boolean) => void;
   setBodyStats: (bodyCount: number, particleCount: number) => void;
   setDebugStats: (stats: DebugStats) => void;
+};
+
+type RenderMode = "particles" | "vectors";
+
+type BodyRenderInfo = {
+  bodyId: number;
+  startIndex: number;
+  perimeterParticleCount: number;
+  particleRadius: number;
+  materialId: number;
 };
 
 type DebugStats = {
@@ -248,6 +388,7 @@ type DebugStats = {
 
 function bindControls(settings: SimulationSettings): ControlBindings {
   const bodyShape = getSelect("body-shape");
+  const renderMode = getSelect("render-mode");
   const bodySize = getInput("body-size");
   const bodySizeOutput = getOutput("body-size-output");
   const particleRadius = getInput("particle-radius");
@@ -267,16 +408,54 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   const softBodyStrengthOutput = getOutput("soft-body-strength-output");
   const viscosity = getInput("viscosity");
   const viscosityOutput = getOutput("viscosity-output");
+  const friction = getInput("friction");
+  const frictionOutput = getOutput("friction-output");
+  const wallBounce = getInput("wall-bounce");
+  const wallBounceOutput = getOutput("wall-bounce-output");
   const mouseForce = getInput("mouse-force");
   const mouseForceOutput = getOutput("mouse-force-output");
+  const propertyMode = getElement("property-mode");
   const pauseButton = getButton("pause-button");
   const resetButton = getButton("reset-button");
   const addBodyButton = getButton("add-body-button");
+  let selectedBodyId: number | undefined;
+  let selectedBodyProperties: BodyProperties | undefined;
+  let spawnBodyProperties: BodyProperties = {
+    softBodyStrength: settings.softBodyStrength,
+    viscosity: settings.viscosity,
+    friction: settings.friction
+  };
+  let syncingBodyControls = false;
 
   const bindings: ControlBindings = {
     onReset: () => undefined,
     onAddBody: () => undefined,
+    onBodyPropertiesChange: () => undefined,
     onPauseToggle: () => undefined,
+    getRenderMode() {
+      return renderMode.value as RenderMode;
+    },
+    getSpawnBodyProperties() {
+      return { ...spawnBodyProperties };
+    },
+    setSelectedBody(bodyId, properties) {
+      selectedBodyId = properties ? bodyId : undefined;
+      selectedBodyProperties = properties ? { ...properties } : undefined;
+      syncingBodyControls = true;
+      if (selectedBodyId === undefined || !selectedBodyProperties) {
+        propertyMode.textContent = "Editing spawn properties";
+        softBodyStrength.value = String(spawnBodyProperties.softBodyStrength);
+        viscosity.value = String(spawnBodyProperties.viscosity);
+        friction.value = String(spawnBodyProperties.friction);
+      } else {
+        propertyMode.textContent = `Editing body ${selectedBodyId + 1}`;
+        softBodyStrength.value = String(selectedBodyProperties.softBodyStrength);
+        viscosity.value = String(selectedBodyProperties.viscosity);
+        friction.value = String(selectedBodyProperties.friction);
+      }
+      syncingBodyControls = false;
+      refresh();
+    },
     setPaused(paused: boolean) {
       pauseButton.textContent = paused ? "Resume" : "Pause";
     },
@@ -296,6 +475,8 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   bondIterations.value = String(settings.bondIterations);
   softBodyStrength.value = String(settings.softBodyStrength);
   viscosity.value = String(settings.viscosity);
+  friction.value = String(settings.friction);
+  wallBounce.value = String(settings.wallBounce);
   mouseForce.value = String(settings.mouseForce);
 
   const refresh = () => {
@@ -306,8 +487,10 @@ function bindControls(settings: SimulationSettings): ControlBindings {
     substepsOutput.value = clampSubsteps(settings.substeps).toFixed(0);
     contactIterationsOutput.value = clampContactIterations(settings.contactIterations).toFixed(0);
     bondIterationsOutput.value = clampBondIterations(settings.bondIterations).toFixed(0);
-    softBodyStrengthOutput.value = settings.softBodyStrength.toFixed(0);
-    viscosityOutput.value = settings.viscosity.toFixed(1);
+    softBodyStrengthOutput.value = getCurrentBodyProperties().softBodyStrength.toFixed(0);
+    viscosityOutput.value = getCurrentBodyProperties().viscosity.toFixed(1);
+    frictionOutput.value = getCurrentBodyProperties().friction.toFixed(2);
+    wallBounceOutput.value = settings.wallBounce.toFixed(2);
     mouseForceOutput.value = settings.mouseForce.toLocaleString();
   };
 
@@ -345,12 +528,31 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   });
 
   softBodyStrength.addEventListener("input", () => {
-    settings.softBodyStrength = softBodyStrength.valueAsNumber;
+    updateCurrentBodyProperties({
+      ...getCurrentBodyProperties(),
+      softBodyStrength: softBodyStrength.valueAsNumber
+    });
     refresh();
   });
 
   viscosity.addEventListener("input", () => {
-    settings.viscosity = viscosity.valueAsNumber;
+    updateCurrentBodyProperties({
+      ...getCurrentBodyProperties(),
+      viscosity: viscosity.valueAsNumber
+    });
+    refresh();
+  });
+
+  friction.addEventListener("input", () => {
+    updateCurrentBodyProperties({
+      ...getCurrentBodyProperties(),
+      friction: friction.valueAsNumber
+    });
+    refresh();
+  });
+
+  wallBounce.addEventListener("input", () => {
+    settings.wallBounce = wallBounce.valueAsNumber;
     refresh();
   });
 
@@ -367,6 +569,25 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   bindings.setBodyStats(0, settings.particleCount);
   refresh();
   return bindings;
+
+  function getCurrentBodyProperties(): BodyProperties {
+    return selectedBodyId === undefined ? spawnBodyProperties : selectedBodyProperties!;
+  }
+
+  function updateCurrentBodyProperties(properties: BodyProperties) {
+    if (selectedBodyId === undefined) {
+      spawnBodyProperties = properties;
+      settings.softBodyStrength = properties.softBodyStrength;
+      settings.viscosity = properties.viscosity;
+      settings.friction = properties.friction;
+      return;
+    }
+
+    selectedBodyProperties = properties;
+    if (!syncingBodyControls) {
+      bindings.onBodyPropertiesChange(selectedBodyId, properties);
+    }
+  }
 }
 
 function encodeGridBuild(
@@ -460,12 +681,220 @@ function smoothTiming(previous: number, next: number) {
   return previous * 0.88 + next * 0.12;
 }
 
+const BODY_FILL_COLORS = ["#47c7f2", "#fab340", "#8aeb7a", "#eb75ba"];
+
+function resizeVectorCanvas(canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const width = Math.max(1, Math.floor(rect.width * dpr));
+  const height = Math.max(1, Math.floor(rect.height * dpr));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function renderVectorLayer(
+  canvas: HTMLCanvasElement,
+  context: CanvasRenderingContext2D,
+  active: boolean,
+  snapshot: ArrayBuffer | undefined,
+  particleCount: number,
+  bodies: BodyRenderInfo[]
+) {
+  canvas.style.opacity = active ? "1" : "0";
+  const width = canvas.width / Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  const height = canvas.height / Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  context.clearRect(0, 0, width, height);
+  if (!active || !snapshot || particleCount === 0) {
+    return;
+  }
+
+  const view = new DataView(snapshot);
+  context.lineJoin = "round";
+  context.lineCap = "round";
+
+  for (const body of bodies) {
+    if (body.perimeterParticleCount < 3 || body.startIndex + body.perimeterParticleCount > particleCount) {
+      continue;
+    }
+
+    context.beginPath();
+    for (let i = 0; i < body.perimeterParticleCount; i += 1) {
+      const offset = (body.startIndex + i) * PARTICLE_STRIDE_BYTES;
+      const x = view.getFloat32(offset, true);
+      const y = view.getFloat32(offset + 4, true);
+      if (i === 0) {
+        context.moveTo(x, y);
+      } else {
+        context.lineTo(x, y);
+      }
+    }
+
+    context.closePath();
+    const bodyColor = BODY_FILL_COLORS[body.materialId % BODY_FILL_COLORS.length];
+    context.fillStyle = bodyColor;
+    context.globalAlpha = 0.82;
+    context.fill();
+    context.globalAlpha = 1;
+    context.strokeStyle = bodyColor;
+    context.lineWidth = Math.max(1, body.particleRadius * 2);
+    context.stroke();
+  }
+}
+
+function updateDragBand(element: HTMLElement, anchor: { x: number; y: number } | undefined, pointer: PointerState) {
+  if (!anchor || !pointer.active || pointer.selectedParticleIndex === 0xffffffff) {
+    element.style.opacity = "0";
+    return;
+  }
+
+  const dx = pointer.x - anchor.x;
+  const dy = pointer.y - anchor.y;
+  const length = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  element.style.opacity = "1";
+  element.style.width = `${length}px`;
+  element.style.transform = `translate(${anchor.x}px, ${anchor.y - 1}px) rotate(${angle}rad)`;
+}
+
+async function pickNearestParticle(
+  device: GPUDevice,
+  particles: ParticleBuffers,
+  readback: GPUBuffer,
+  x: number,
+  y: number
+) {
+  if (particles.particleCount === 0) {
+    return undefined;
+  }
+
+  const byteLength = particles.particleCount * PARTICLE_STRIDE_BYTES;
+  const encoder = device.createCommandEncoder({ label: "Particle picking readback encoder" });
+  encoder.copyBufferToBuffer(particles.buffers[particles.activeIndex], 0, readback, 0, byteLength);
+  device.queue.submit([encoder.finish()]);
+
+  await readback.mapAsync(GPUMapMode.READ, 0, byteLength);
+  try {
+    return pickNearestParticleFromView(new DataView(readback.getMappedRange(0, byteLength)), particles.particleCount, x, y);
+  } finally {
+    readback.unmap();
+  }
+}
+
+async function readParticleSnapshot(device: GPUDevice, particles: ParticleBuffers, readback: GPUBuffer) {
+  const particleCount = particles.particleCount;
+  const byteLength = particleCount * PARTICLE_STRIDE_BYTES;
+  const encoder = device.createCommandEncoder({ label: "Particle snapshot readback encoder" });
+  encoder.copyBufferToBuffer(particles.buffers[particles.activeIndex], 0, readback, 0, byteLength);
+  device.queue.submit([encoder.finish()]);
+
+  await readback.mapAsync(GPUMapMode.READ, 0, byteLength);
+  try {
+    const source = readback.getMappedRange(0, byteLength);
+    return {
+      data: source.slice(0),
+      particleCount
+    };
+  } finally {
+    readback.unmap();
+  }
+}
+
+function pickNearestParticleFromSnapshot(
+  snapshot: ArrayBuffer | undefined,
+  particleCount: number,
+  x: number,
+  y: number
+) {
+  if (!snapshot || particleCount === 0) {
+    return undefined;
+  }
+
+  return pickNearestParticleFromView(new DataView(snapshot), particleCount, x, y);
+}
+
+function getParticlePositionFromSnapshot(
+  snapshot: ArrayBuffer | undefined,
+  particleCount: number,
+  particleIndex: number
+) {
+  if (!snapshot || particleIndex >= particleCount || particleIndex === 0xffffffff) {
+    return undefined;
+  }
+
+  const view = new DataView(snapshot);
+  const offset = particleIndex * PARTICLE_STRIDE_BYTES;
+  const radius = view.getFloat32(offset + 24, true);
+  if (radius <= 0) {
+    return undefined;
+  }
+
+  return {
+    x: view.getFloat32(offset, true),
+    y: view.getFloat32(offset + 4, true)
+  };
+}
+
+function pickNearestParticleFromView(view: DataView, particleCount: number, x: number, y: number) {
+  let bestParticleIndex = -1;
+  let bestBodyId = -1;
+  let bestDistanceSq = Number.POSITIVE_INFINITY;
+  let bestRadius = 0;
+  let bestX = 0;
+  let bestY = 0;
+
+  for (let index = 0; index < particleCount; index += 1) {
+    const offset = index * PARTICLE_STRIDE_BYTES;
+    const px = view.getFloat32(offset, true);
+    const py = view.getFloat32(offset + 4, true);
+    const flags = view.getUint32(offset + 20, true);
+    const radius = view.getFloat32(offset + 24, true);
+    if (radius <= 0) {
+      continue;
+    }
+
+    const dx = px - x;
+    const dy = py - y;
+    const distanceSq = dx * dx + dy * dy;
+    if (distanceSq < bestDistanceSq) {
+      bestParticleIndex = index;
+      bestBodyId = flags & 0x0000ffff;
+      bestDistanceSq = distanceSq;
+      bestRadius = radius;
+      bestX = px;
+      bestY = py;
+    }
+  }
+
+  const pickRadius = Math.max(36, bestRadius * 3);
+  if (bestParticleIndex < 0 || bestDistanceSq > pickRadius * pickRadius) {
+    return undefined;
+  }
+
+  return {
+    particleIndex: bestParticleIndex,
+    bodyId: bestBodyId,
+    x: bestX,
+    y: bestY
+  };
+}
+
 function getInput(id: string): HTMLInputElement {
   const input = document.getElementById(id);
   if (!(input instanceof HTMLInputElement)) {
     throw new Error(`Missing input #${id}`);
   }
   return input;
+}
+
+function getElement(id: string): HTMLElement {
+  const element = document.getElementById(id);
+  if (!(element instanceof HTMLElement)) {
+    throw new Error(`Missing element #${id}`);
+  }
+  return element;
 }
 
 function getOutput(id: string): HTMLOutputElement {
