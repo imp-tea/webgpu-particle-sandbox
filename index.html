@@ -13,7 +13,7 @@
           <div>
             <h1>Particle Sandbox</h1>
             <p id="gpu-status">Initializing WebGPU...</p>
-            <p id="debug-stats">substeps 2x | cell max -- | encode --ms | frame --ms</p>
+            <p id="debug-stats">substeps 8x | cell max -- | encode --ms | frame --ms</p>
           </div>
           <div class="button-row">
             <button id="pause-button" type="button">Pause</button>
@@ -31,13 +31,13 @@
         </label>
 
         <label>
-          <span>Size <output id="body-size-output">140</output></span>
-          <input id="body-size" type="range" min="48" max="240" step="8" value="140" />
+          <span>Size <output id="body-size-output">120</output></span>
+          <input id="body-size" type="range" min="48" max="240" step="8" value="120" />
         </label>
 
         <label>
-          <span>Radius <output id="particle-radius-output">3.2</output></span>
-          <input id="particle-radius" type="range" min="1" max="8" step="0.1" value="3.2" />
+          <span>Radius <output id="particle-radius-output">8.0</output></span>
+          <input id="particle-radius" type="range" min="1" max="8" step="0.1" value="8" />
         </label>
 
         <button id="add-body-button" type="button">Add body</button>
@@ -53,18 +53,18 @@
         </label>
 
         <label>
-          <span>Substeps <output id="substeps-output">2</output></span>
-          <input id="substeps" type="range" min="1" max="8" step="1" value="2" />
+          <span>Substeps <output id="substeps-output">8</output></span>
+          <input id="substeps" type="range" min="1" max="8" step="1" value="8" />
         </label>
 
         <label>
-          <span>Contact iterations <output id="contact-iterations-output">3</output></span>
-          <input id="contact-iterations" type="range" min="0" max="8" step="1" value="3" />
+          <span>Contact iterations <output id="contact-iterations-output">8</output></span>
+          <input id="contact-iterations" type="range" min="0" max="8" step="1" value="8" />
         </label>
 
         <label>
-          <span>Bond iterations <output id="bond-iterations-output">4</output></span>
-          <input id="bond-iterations" type="range" min="1" max="8" step="1" value="4" />
+          <span>Bond iterations <output id="bond-iterations-output">8</output></span>
+          <input id="bond-iterations" type="range" min="1" max="8" step="1" value="8" />
         </label>
 
         <label>
@@ -78,28 +78,8 @@
         </label>
 
         <label>
-          <span>Mouse force <output id="mouse-force-output">60000</output></span>
-          <input id="mouse-force" type="range" min="0" max="180000" step="5000" value="60000" />
-        </label>
-
-        <label>
-          <span>Repulsion <output id="repulsion-output">180</output></span>
-          <input id="repulsion" type="range" min="0" max="800" step="10" value="180" />
-        </label>
-
-        <label>
-          <span>Cohesion <output id="cohesion-output">0.08</output></span>
-          <input id="cohesion" type="range" min="0" max="1.5" step="0.01" value="0.08" />
-        </label>
-
-        <label>
-          <span>Materials</span>
-          <select id="material-preset">
-            <option value="mixed">Mixed</option>
-            <option value="granular">Granular</option>
-            <option value="liquid">Liquid</option>
-            <option value="separated">Separated</option>
-          </select>
+          <span>Mouse force <output id="mouse-force-output">180000</output></span>
+          <input id="mouse-force" type="range" min="0" max="180000" step="5000" value="180000" />
         </label>
       </section>
     </main>

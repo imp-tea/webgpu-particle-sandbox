@@ -222,26 +222,6 @@ export function createPipelines(
       {
         binding: 3,
         visibility: GPUShaderStage.COMPUTE,
-        buffer: { type: "storage" }
-      },
-      {
-        binding: 4,
-        visibility: GPUShaderStage.COMPUTE,
-        buffer: { type: "read-only-storage" }
-      },
-      {
-        binding: 5,
-        visibility: GPUShaderStage.COMPUTE,
-        buffer: { type: "read-only-storage" }
-      },
-      {
-        binding: 6,
-        visibility: GPUShaderStage.COMPUTE,
-        buffer: { type: "read-only-storage" }
-      },
-      {
-        binding: 7,
-        visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "read-only-storage" }
       }
     ]
@@ -580,10 +560,6 @@ export function createPipelines(
       particleBuffers[0],
       particleBuffers[1],
       uniformBuffer,
-      gridBuffers.cellCounts,
-      gridBuffers.cellStarts,
-      gridBuffers.pairValues,
-      materialBuffer,
       bodyBuffer,
       "A to B"
     ),
@@ -593,10 +569,6 @@ export function createPipelines(
       particleBuffers[1],
       particleBuffers[0],
       uniformBuffer,
-      gridBuffers.cellCounts,
-      gridBuffers.cellStarts,
-      gridBuffers.pairValues,
-      materialBuffer,
       bodyBuffer,
       "B to A"
     )
@@ -706,10 +678,6 @@ function createSimulateBindGroup(
   source: GPUBuffer,
   destination: GPUBuffer,
   uniformBuffer: GPUBuffer,
-  cellCounts: GPUBuffer,
-  cellStarts: GPUBuffer,
-  pairValues: GPUBuffer,
-  materialBuffer: GPUBuffer,
   bodyBuffer: GPUBuffer,
   label: string
 ) {
@@ -720,11 +688,7 @@ function createSimulateBindGroup(
       { binding: 0, resource: { buffer: source } },
       { binding: 1, resource: { buffer: destination } },
       { binding: 2, resource: { buffer: uniformBuffer } },
-      { binding: 3, resource: { buffer: cellCounts } },
-      { binding: 4, resource: { buffer: cellStarts } },
-      { binding: 5, resource: { buffer: pairValues } },
-      { binding: 6, resource: { buffer: materialBuffer } },
-      { binding: 7, resource: { buffer: bodyBuffer } }
+      { binding: 3, resource: { buffer: bodyBuffer } }
     ]
   });
 }

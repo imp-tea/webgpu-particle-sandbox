@@ -15,13 +15,12 @@ struct RenderParams {
   deltaTime: f32,
   damping: f32,
   particleCount: u32,
-  particleRepulsion: f32,
+  padding0: f32,
   maxSpeed: f32,
 };
 
 struct MaterialParams {
   color: vec4<f32>,
-  dynamics: vec4<f32>,
 };
 
 struct VertexOut {

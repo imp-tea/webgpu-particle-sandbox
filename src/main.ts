@@ -7,9 +7,7 @@ import {
   createParticleBuffers,
   createUniformBuffer,
   getGridDimensions,
-  type MaterialPreset,
   type SoftBodyShape,
-  writeMaterialParams,
   writeSimParams,
   type GridBuffers,
   type ParticleBuffers
@@ -74,10 +72,6 @@ async function start() {
       }
     };
 
-    ui.onMaterialPresetChange = (preset) => {
-      writeMaterialParams(gpu.device, materials, preset);
-    };
-
     let paused = false;
     let lastTime = performance.now();
     let latestMaxCellOccupancy = 0;
@@ -114,18 +108,11 @@ async function start() {
         const simulationStart = performance.now();
         const simulationEncoder = gpu.device.createCommandEncoder({ label: "Simulation command encoder" });
         for (let step = 0; step < substeps; step += 1) {
-          encodeGridBuild(
-            simulationEncoder,
-            pipelines,
-            particles,
-            grid,
-            activeCellCount,
-            cellScanGroups,
-            settings.particleCount
-          );
           encodeSimulationIntegrate(simulationEncoder, pipelines, particles, settings.particleCount);
           particles.swap();
+        }
 
+        if (particles.bodyCount > 1) {
           for (let iteration = 0; iteration < clampContactIterations(settings.contactIterations); iteration += 1) {
             encodeGridBuild(
               simulationEncoder,
@@ -222,7 +209,6 @@ type ControlBindings = {
   onReset: () => void;
   onAddBody: (shape: SoftBodyShape, size: number, particleRadius: number) => void;
   onPauseToggle: () => void;
-  onMaterialPresetChange: (preset: MaterialPreset) => void;
   setPaused: (paused: boolean) => void;
   setBodyStats: (bodyCount: number, particleCount: number) => void;
   setDebugStats: (stats: DebugStats) => void;
@@ -259,11 +245,6 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   const viscosityOutput = getOutput("viscosity-output");
   const mouseForce = getInput("mouse-force");
   const mouseForceOutput = getOutput("mouse-force-output");
-  const repulsion = getInput("repulsion");
-  const repulsionOutput = getOutput("repulsion-output");
-  const cohesion = getInput("cohesion");
-  const cohesionOutput = getOutput("cohesion-output");
-  const materialPreset = getSelect("material-preset");
   const pauseButton = getButton("pause-button");
   const resetButton = getButton("reset-button");
   const addBodyButton = getButton("add-body-button");
@@ -272,7 +253,6 @@ function bindControls(settings: SimulationSettings): ControlBindings {
     onReset: () => undefined,
     onAddBody: () => undefined,
     onPauseToggle: () => undefined,
-    onMaterialPresetChange: () => undefined,
     setPaused(paused: boolean) {
       pauseButton.textContent = paused ? "Resume" : "Pause";
     },
@@ -293,8 +273,6 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   softBodyStrength.value = String(settings.softBodyStrength);
   viscosity.value = String(settings.viscosity);
   mouseForce.value = String(settings.mouseForce);
-  repulsion.value = String(settings.particleRepulsion);
-  cohesion.value = String(settings.cohesion);
 
   const refresh = () => {
     bodySizeOutput.value = bodySize.valueAsNumber.toFixed(0);
@@ -307,8 +285,6 @@ function bindControls(settings: SimulationSettings): ControlBindings {
     softBodyStrengthOutput.value = settings.softBodyStrength.toFixed(0);
     viscosityOutput.value = settings.viscosity.toFixed(1);
     mouseForceOutput.value = settings.mouseForce.toLocaleString();
-    repulsionOutput.value = settings.particleRepulsion.toFixed(0);
-    cohesionOutput.value = settings.cohesion.toFixed(2);
   };
 
   bodySize.addEventListener("input", () => {
@@ -357,20 +333,6 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   mouseForce.addEventListener("input", () => {
     settings.mouseForce = mouseForce.valueAsNumber;
     refresh();
-  });
-
-  repulsion.addEventListener("input", () => {
-    settings.particleRepulsion = repulsion.valueAsNumber;
-    refresh();
-  });
-
-  cohesion.addEventListener("input", () => {
-    settings.cohesion = cohesion.valueAsNumber;
-    refresh();
-  });
-
-  materialPreset.addEventListener("change", () => {
-    bindings.onMaterialPresetChange(materialPreset.value as MaterialPreset);
   });
 
   pauseButton.addEventListener("click", () => bindings.onPauseToggle());
