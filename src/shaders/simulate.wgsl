@@ -35,18 +35,26 @@ struct SimParams {
 struct BodyParams {
   startIndex: u32,
   particleCount: u32,
-  columns: u32,
-  rows: u32,
-  restCellSize: vec2<f32>,
-  padding: vec2<f32>,
+  padding0: vec2<u32>,
+  padding1: vec4<f32>,
+};
+
+struct Bond {
+  neighborIndex: u32,
+  restLength: f32,
+  weight: f32,
+  padding: f32,
 };
 
 @group(0) @binding(0) var<storage, read> particlesIn: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> particlesOut: array<Particle>;
 @group(0) @binding(2) var<uniform> params: SimParams;
 @group(0) @binding(3) var<storage, read> bodies: array<BodyParams>;
+@group(0) @binding(4) var<storage, read> bonds: array<Bond>;
 
 const BODY_ID_MASK: u32 = 0x0000ffffu;
+const BOND_SLOT_COUNT: u32 = 8u;
+const INVALID_BOND_INDEX: u32 = 0xffffffffu;
 
 // Integrates particles from a source state buffer into a destination state buffer.
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -128,7 +136,7 @@ fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> 
 
   let bodyId = particleBodyId(particlesIn[index]);
   let body = bodies[bodyId];
-  if (body.particleCount == 0u || body.columns == 0u || body.rows == 0u || index < body.startIndex) {
+  if (body.particleCount == 0u || index < body.startIndex) {
     return predictedPosition;
   }
 
@@ -137,52 +145,15 @@ fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> 
     return predictedPosition;
   }
 
-  let column = localIndex % body.columns;
-  let row = localIndex / body.columns;
   let iterations = min(params.bondIterations, 8u);
   let targetStiffness = clamp(params.softBodyStrength / 6000.0, 0.0, 1.0);
   let iterationStiffness = 1.0 - pow(1.0 - targetStiffness, 1.0 / f32(iterations));
-  let diagonalRestDistance = length(body.restCellSize);
   var position = predictedPosition;
 
   for (var iteration = 0u; iteration < iterations; iteration += 1u) {
-    if (column > 0u) {
-      position = relaxBond(position, bodyId, index - 1u, body.restCellSize.x, iterationStiffness, 1.0);
-    }
-    if (column + 1u < body.columns) {
-      position = relaxBond(position, bodyId, index + 1u, body.restCellSize.x, iterationStiffness, 1.0);
-    }
-    if (row > 0u) {
-      position = relaxBond(position, bodyId, index - body.columns, body.restCellSize.y, iterationStiffness, 1.0);
-    }
-    if (row + 1u < body.rows) {
-      position = relaxBond(position, bodyId, index + body.columns, body.restCellSize.y, iterationStiffness, 1.0);
-    }
-
-    if (column > 0u && row > 0u) {
-      position = relaxBond(position, bodyId, index - body.columns - 1u, diagonalRestDistance, iterationStiffness, 0.75);
-    }
-    if (column + 1u < body.columns && row > 0u) {
-      position = relaxBond(position, bodyId, index - body.columns + 1u, diagonalRestDistance, iterationStiffness, 0.75);
-    }
-    if (column > 0u && row + 1u < body.rows) {
-      position = relaxBond(position, bodyId, index + body.columns - 1u, diagonalRestDistance, iterationStiffness, 0.75);
-    }
-    if (column + 1u < body.columns && row + 1u < body.rows) {
-      position = relaxBond(position, bodyId, index + body.columns + 1u, diagonalRestDistance, iterationStiffness, 0.75);
-    }
-
-    if (column > 1u) {
-      position = relaxBond(position, bodyId, index - 2u, body.restCellSize.x * 2.0, iterationStiffness, 0.35);
-    }
-    if (column + 2u < body.columns) {
-      position = relaxBond(position, bodyId, index + 2u, body.restCellSize.x * 2.0, iterationStiffness, 0.35);
-    }
-    if (row > 1u) {
-      position = relaxBond(position, bodyId, index - body.columns * 2u, body.restCellSize.y * 2.0, iterationStiffness, 0.35);
-    }
-    if (row + 2u < body.rows) {
-      position = relaxBond(position, bodyId, index + body.columns * 2u, body.restCellSize.y * 2.0, iterationStiffness, 0.35);
+    for (var slot = 0u; slot < BOND_SLOT_COUNT; slot += 1u) {
+      let bond = bonds[index * BOND_SLOT_COUNT + slot];
+      position = relaxBond(position, bodyId, bond, iterationStiffness);
     }
   }
 
@@ -201,7 +172,7 @@ fn dampSoftBodyVelocity(index: u32, velocity: vec2<f32>) -> vec2<f32> {
 
   let bodyId = particleBodyId(particlesIn[index]);
   let body = bodies[bodyId];
-  if (body.particleCount == 0u || body.columns == 0u || body.rows == 0u || index < body.startIndex) {
+  if (body.particleCount == 0u || index < body.startIndex) {
     return velocity;
   }
 
@@ -210,49 +181,12 @@ fn dampSoftBodyVelocity(index: u32, velocity: vec2<f32>) -> vec2<f32> {
     return velocity;
   }
 
-  let column = localIndex % body.columns;
-  let row = localIndex / body.columns;
   var delta = vec2<f32>(0.0);
   var weightSum = 0.0;
 
-  if (column > 0u) {
-    let sample = sampleNeighborVelocity(bodyId, index - 1u, velocity, 1.0);
-    delta += sample.delta;
-    weightSum += sample.weight;
-  }
-  if (column + 1u < body.columns) {
-    let sample = sampleNeighborVelocity(bodyId, index + 1u, velocity, 1.0);
-    delta += sample.delta;
-    weightSum += sample.weight;
-  }
-  if (row > 0u) {
-    let sample = sampleNeighborVelocity(bodyId, index - body.columns, velocity, 1.0);
-    delta += sample.delta;
-    weightSum += sample.weight;
-  }
-  if (row + 1u < body.rows) {
-    let sample = sampleNeighborVelocity(bodyId, index + body.columns, velocity, 1.0);
-    delta += sample.delta;
-    weightSum += sample.weight;
-  }
-
-  if (column > 0u && row > 0u) {
-    let sample = sampleNeighborVelocity(bodyId, index - body.columns - 1u, velocity, 0.6);
-    delta += sample.delta;
-    weightSum += sample.weight;
-  }
-  if (column + 1u < body.columns && row > 0u) {
-    let sample = sampleNeighborVelocity(bodyId, index - body.columns + 1u, velocity, 0.6);
-    delta += sample.delta;
-    weightSum += sample.weight;
-  }
-  if (column > 0u && row + 1u < body.rows) {
-    let sample = sampleNeighborVelocity(bodyId, index + body.columns - 1u, velocity, 0.6);
-    delta += sample.delta;
-    weightSum += sample.weight;
-  }
-  if (column + 1u < body.columns && row + 1u < body.rows) {
-    let sample = sampleNeighborVelocity(bodyId, index + body.columns + 1u, velocity, 0.6);
+  for (var slot = 0u; slot < BOND_SLOT_COUNT; slot += 1u) {
+    let bond = bonds[index * BOND_SLOT_COUNT + slot];
+    let sample = sampleNeighborVelocity(bodyId, bond, velocity);
     delta += sample.delta;
     weightSum += sample.weight;
   }
@@ -265,32 +199,30 @@ fn dampSoftBodyVelocity(index: u32, velocity: vec2<f32>) -> vec2<f32> {
   return velocity + delta / weightSum * blend;
 }
 
-fn sampleNeighborVelocity(bodyId: u32, otherIndex: u32, velocity: vec2<f32>, weight: f32) -> VelocitySample {
-  if (otherIndex >= params.particleCount) {
+fn sampleNeighborVelocity(bodyId: u32, bond: Bond, velocity: vec2<f32>) -> VelocitySample {
+  if (bond.neighborIndex == INVALID_BOND_INDEX || bond.neighborIndex >= params.particleCount || bond.weight <= 0.0) {
     return VelocitySample(vec2<f32>(0.0), 0.0);
   }
 
-  let other = particlesIn[otherIndex];
+  let other = particlesIn[bond.neighborIndex];
   if (!particleActive(other) || particleBodyId(other) != bodyId) {
     return VelocitySample(vec2<f32>(0.0), 0.0);
   }
 
-  return VelocitySample((other.velocity - velocity) * weight, weight);
+  return VelocitySample((other.velocity - velocity) * bond.weight, bond.weight);
 }
 
-fn relaxBond(
-  position: vec2<f32>,
-  bodyId: u32,
-  otherIndex: u32,
-  restDistance: f32,
-  iterationStiffness: f32,
-  weight: f32
-) -> vec2<f32> {
-  if (otherIndex >= params.particleCount) {
+fn relaxBond(position: vec2<f32>, bodyId: u32, bond: Bond, iterationStiffness: f32) -> vec2<f32> {
+  if (
+    bond.neighborIndex == INVALID_BOND_INDEX ||
+    bond.neighborIndex >= params.particleCount ||
+    bond.restLength <= 0.0 ||
+    bond.weight <= 0.0
+  ) {
     return position;
   }
 
-  let other = particlesIn[otherIndex];
+  let other = particlesIn[bond.neighborIndex];
   if (!particleActive(other) || particleBodyId(other) != bodyId) {
     return position;
   }
@@ -304,9 +236,9 @@ fn relaxBond(
 
   let distance = sqrt(distanceSq);
   let direction = delta / distance;
-  let safeRestDistance = max(restDistance, 0.01);
+  let safeRestDistance = max(bond.restLength, 0.01);
   let stretch = clamp(distance - safeRestDistance, -safeRestDistance * 0.5, safeRestDistance * 0.5);
-  let correction = stretch * 0.5 * iterationStiffness * weight;
+  let correction = stretch * 0.5 * iterationStiffness * bond.weight;
 
   return position - direction * correction;
 }

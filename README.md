@@ -41,7 +41,7 @@ src/main.ts                    App bootstrap, UI binding, render loop, pass orch
 src/config.ts                  Tunables, limits, and shared byte sizes
 src/input.ts                   Pointer input mapped to simulation uniforms
 src/gpu/initWebGPU.ts          Adapter/device/context setup and resize handling
-src/gpu/buffers.ts             Particle/grid/color/body buffer allocation and CPU-side body spawning
+src/gpu/buffers.ts             Particle/grid/color/body/bond buffer allocation and CPU-side body spawning
 src/gpu/pipelines.ts           Compute/render pipelines and bind groups
 src/shaders/clearGrid.wgsl     Clears active spatial grid counters, offsets, and debug counters
 src/shaders/countGrid.wgsl     Counts particles per active grid cell
@@ -76,7 +76,7 @@ scatterGrid       Scatter particle ids into contiguous per-cell ranges.
 solveContacts     Push overlapping particles from different bodies apart.
 ```
 
-Rendering draws six vertices per particle as instanced quads and shades circular sprites from the current particle buffer and fixed per-body colors.
+Rendering draws six vertices per particle as instanced quads and shades circular sprites from the current particle buffer and fixed per-body colors. Soft-body bonds are stored explicitly in a separate GPU storage buffer, so body shapes are not constrained to square lattice indexing.
 
 ## GPU Data
 
@@ -96,10 +96,16 @@ Body layout is 32 bytes:
 ```text
 start index: u32
 count:       u32
-columns:     u32
-rows:        u32
-rest cell:   vec2<f32>
-padding:     vec2<f32>
+padding:     24 bytes
+```
+
+Bond layout is 16 bytes per slot, with 8 fixed slots per particle:
+
+```text
+neighbor id: u32
+rest length: f32
+weight:      f32
+padding:     f32
 ```
 
 Color layout is 16 bytes:
@@ -108,16 +114,17 @@ Color layout is 16 bytes:
 color:       vec4<f32>
 ```
 
-CPU code only creates or clears particle and body data when the user adds bodies or clicks **Clear**. Normal simulation and rendering stay GPU-side.
+CPU code only creates or clears particle, body, and bond data when the user adds bodies or clicks **Clear**. Normal simulation and rendering stay GPU-side.
 
 ## Behavior Notes
 
-- Same-body particles preserve local soft-body shape through lattice constraints.
+- Same-body particles preserve local soft-body shape through explicit per-particle neighbor bonds.
 - Different bodies interact through the contact projection pass.
-- Elasticity preserves each spawned body's local lattice with horizontal, vertical, diagonal, and weaker two-cell axial constraints. Set it to `0` to return toward particle-fluid behavior.
+- Spawned bodies use shape-specific point sets for squares, circles, and triangles. Squares and triangles emit exact corner particles and evenly spaced edge particles first; circles emit evenly spaced particles exactly on the circumference. The interior starts from a hexagonal fill, rejects candidates too close to the fixed outline particles, then runs a few CPU-side spacing relaxation passes before each particle builds up to 8 nearby neighbor bonds. Boundary-to-boundary bonds receive a modestly higher weight.
+- Elasticity scales the explicit bond solve. Set it to `0` to return toward particle-fluid behavior.
 - Bond iterations repeat the local shape solve inside each integration pass. Raise this for stiffer, less fabric-like bodies.
 - Contact iterations run separate cross-body overlap projection passes. Raise this when bodies visibly interpenetrate.
-- Viscosity damps relative motion between local lattice neighbors without using the spatial grid. Higher values make soft bodies less jiggly but more sluggish.
+- Viscosity damps relative motion across the same explicit neighbor slots without using the spatial grid. Higher values make soft bodies less jiggly but more sluggish.
 - Higher substep, contact-iteration, and bond-iteration counts improve stability but multiply compute work.
 
 ## Current Limits
@@ -139,7 +146,7 @@ Implemented:
 3. GPU spatial grid build using count, prefix scan, and scatter passes.
 4. Cross-body contact sampling from each particle's own cell and adjacent cells.
 5. Body-local velocity damping and soft-body shape retention.
-6. Reset-layout soft-body lattice constraints.
+6. Explicit per-particle soft-body bond constraints.
 7. Separate cross-body contact projection iterations.
 8. Fixed per-body colors through a GPU storage buffer.
 9. GPU debug counters for max cell occupancy and scatter overflow during contact grid builds.

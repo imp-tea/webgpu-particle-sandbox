@@ -1,6 +1,7 @@
 import "./style.css";
 import { WORKGROUP_SIZE, defaultSettings, type SimulationSettings } from "./config";
 import {
+  createBondBuffer,
   createBodyBuffer,
   createGridBuffers,
   createMaterialBuffer,
@@ -42,27 +43,28 @@ async function start() {
     const uniforms = createUniformBuffer(gpu.device);
     const materials = createMaterialBuffer(gpu.device);
     const bodies = createBodyBuffer(gpu.device);
-    const pipelines = createPipelines(gpu.device, gpu.format, particles.buffers, uniforms, grid, materials, bodies);
+    const bonds = createBondBuffer(gpu.device);
+    const pipelines = createPipelines(gpu.device, gpu.format, particles.buffers, uniforms, grid, materials, bodies, bonds);
 
     gpu.device.lost.then((info) => {
       statusLabel.textContent = `WebGPU device lost: ${info.message || info.reason}`;
     });
 
     gpu.resize();
-    particles.clear(gpu.device, bodies);
+    particles.clear(gpu.device, bodies, bonds);
     settings.particleCount = particles.particleCount;
     ui.setBodyStats(particles.bodyCount, particles.particleCount);
     statusLabel.textContent = `${gpu.adapter.info?.vendor || "GPU"} adapter ready`;
 
     ui.onReset = () => {
-      particles.clear(gpu.device, bodies);
+      particles.clear(gpu.device, bodies, bonds);
       settings.particleCount = particles.particleCount;
       ui.setBodyStats(particles.bodyCount, particles.particleCount);
     };
 
     ui.onAddBody = (shape, bodySize, particleRadius) => {
       const size = gpu.getWorldSize();
-      const result = particles.addSoftBody(gpu.device, bodies, shape, bodySize, particleRadius, size.width, size.height);
+      const result = particles.addSoftBody(gpu.device, bodies, bonds, shape, bodySize, particleRadius, size.width, size.height);
       if (result.added) {
         settings.particleCount = result.particleCount;
         ui.setBodyStats(result.bodyCount, result.particleCount);
