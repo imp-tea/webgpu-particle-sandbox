@@ -1,6 +1,7 @@
 export const WORKGROUP_SIZE = 128;
 export const SCAN_BLOCK_SIZE = 256;
 export const PARTICLE_STRIDE_BYTES = 32;
+export const BODY_STRIDE_BYTES = 32;
 export const MATERIAL_COUNT = 4;
 export const MATERIAL_STRIDE_BYTES = 32;
 export const SIM_PARAMS_BYTES = 96;
@@ -10,10 +11,11 @@ export const MAX_GRID_COLUMNS = 256;
 export const MAX_GRID_ROWS = 144;
 export const MAX_GRID_CELLS = MAX_GRID_COLUMNS * MAX_GRID_ROWS;
 export const GRID_PARTICLE_CAPACITY = 65_536;
+export const MAX_BODIES = 96;
 export const MAX_SCAN_GROUPS = Math.ceil(MAX_GRID_CELLS / SCAN_BLOCK_SIZE);
 
 export const DEFAULT_CONFIG = {
-  initialParticles: 10_000,
+  initialParticles: 0,
   maxParticles: 50_000,
   gravityY: 280,
   damping: 0.25,

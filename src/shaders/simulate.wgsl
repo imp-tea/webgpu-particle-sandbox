@@ -37,6 +37,15 @@ struct MaterialParams {
   dynamics: vec4<f32>,
 };
 
+struct BodyParams {
+  startIndex: u32,
+  particleCount: u32,
+  columns: u32,
+  rows: u32,
+  restCellSize: vec2<f32>,
+  padding: vec2<f32>,
+};
+
 @group(0) @binding(0) var<storage, read> particlesIn: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> particlesOut: array<Particle>;
 @group(0) @binding(2) var<uniform> params: SimParams;
@@ -44,6 +53,9 @@ struct MaterialParams {
 @group(0) @binding(4) var<storage, read> cellStarts: array<u32>;
 @group(0) @binding(5) var<storage, read> pairValues: array<u32>;
 @group(0) @binding(6) var<storage, read> materials: array<MaterialParams>;
+@group(0) @binding(7) var<storage, read> bodies: array<BodyParams>;
+
+const BODY_ID_MASK: u32 = 0x0000ffffu;
 
 // Integrates particles from a source state buffer into a destination state buffer.
 // Neighbor forces are sampled from the spatial grid built earlier in the frame.
@@ -55,6 +67,11 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
   }
 
   var particle = particlesIn[index];
+  if (!particleActive(particle)) {
+    particlesOut[index] = particle;
+    return;
+  }
+
   var acceleration = params.gravity;
 
   if (params.mouseForce != 0.0) {
@@ -146,6 +163,10 @@ fn neighborForces(index: u32, particle: Particle) -> vec2<f32> {
 }
 
 fn pairForce(particle: Particle, other: Particle) -> vec2<f32> {
+  if (!particleActive(other)) {
+    return vec2<f32>(0.0);
+  }
+
   let delta = particle.position - other.position;
   let distanceSq = dot(delta, delta);
   if (distanceSq < 0.0001) {
@@ -154,7 +175,8 @@ fn pairForce(particle: Particle, other: Particle) -> vec2<f32> {
 
   let distance = sqrt(distanceSq);
   let restDistance = particle.radius + other.radius;
-  let interactionDistance = restDistance * 4.0;
+  let differentBody = particleBodyId(particle) != particleBodyId(other);
+  let interactionDistance = select(restDistance * 4.0, restDistance * 6.0, differentBody);
 
   if (distance >= interactionDistance) {
     return vec2<f32>(0.0);
@@ -165,7 +187,10 @@ fn pairForce(particle: Particle, other: Particle) -> vec2<f32> {
   let direction = delta / distance;
   let overlap = max(0.0, restDistance - distance) / restDistance;
   let repulsionScale = (material.dynamics.x + otherMaterial.dynamics.x) * 0.5;
-  let repulsion = overlap * params.particleRepulsion * repulsionScale;
+  let contactDistance = select(restDistance, restDistance * 2.65, differentBody);
+  let nearContact = max(0.0, contactDistance - distance) / contactDistance;
+  let bodyBarrier = select(0.0, nearContact * nearContact * params.particleRepulsion * 12.0, differentBody);
+  let repulsion = overlap * params.particleRepulsion * repulsionScale + bodyBarrier;
 
   let normalizedDistance = clamp(distance / interactionDistance, 0.0, 1.0);
   let attractionBand = smoothstep(0.30, 0.62, normalizedDistance) * (1.0 - smoothstep(0.62, 1.0, normalizedDistance));
@@ -173,7 +198,11 @@ fn pairForce(particle: Particle, other: Particle) -> vec2<f32> {
   let sameAffinity = (material.dynamics.z + otherMaterial.dynamics.z) * 0.5;
   let crossAffinity = (material.dynamics.w + otherMaterial.dynamics.w) * 0.5;
   let materialAffinity = select(crossAffinity, sameAffinity, particle.materialId == other.materialId);
-  let attraction = attractionBand * params.particleRepulsion * materialAffinity * cohesionScale * params.cohesion;
+  let attraction = select(
+    attractionBand * params.particleRepulsion * materialAffinity * cohesionScale * params.cohesion,
+    0.0,
+    differentBody
+  );
 
   let proximity = 1.0 - normalizedDistance;
   let velocityBlend = (other.velocity - particle.velocity) * params.viscosity * proximity * 0.35;
@@ -181,56 +210,67 @@ fn pairForce(particle: Particle, other: Particle) -> vec2<f32> {
 }
 
 fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> {
-  if (params.softBodyStrength <= 0.0 || params.restColumns == 0u || params.restRows == 0u || params.bondIterations == 0u) {
+  if (params.softBodyStrength <= 0.0 || params.bondIterations == 0u) {
     return predictedPosition;
   }
 
-  let column = index % params.restColumns;
-  let row = index / params.restColumns;
+  let bodyId = particleBodyId(particlesIn[index]);
+  let body = bodies[bodyId];
+  if (body.particleCount == 0u || body.columns == 0u || body.rows == 0u || index < body.startIndex) {
+    return predictedPosition;
+  }
+
+  let localIndex = index - body.startIndex;
+  if (localIndex >= body.particleCount) {
+    return predictedPosition;
+  }
+
+  let column = localIndex % body.columns;
+  let row = localIndex / body.columns;
   let iterations = min(params.bondIterations, 8u);
   let targetStiffness = clamp(params.softBodyStrength / 6000.0, 0.0, 1.0);
   let iterationStiffness = 1.0 - pow(1.0 - targetStiffness, 1.0 / f32(iterations));
-  let diagonalRestDistance = length(params.restCellSize);
+  let diagonalRestDistance = length(body.restCellSize);
   var position = predictedPosition;
 
   for (var iteration = 0u; iteration < iterations; iteration += 1u) {
     if (column > 0u) {
-      position = relaxBond(position, index - 1u, params.restCellSize.x, iterationStiffness, 1.0);
+      position = relaxBond(position, bodyId, index - 1u, body.restCellSize.x, iterationStiffness, 1.0);
     }
-    if (column + 1u < params.restColumns) {
-      position = relaxBond(position, index + 1u, params.restCellSize.x, iterationStiffness, 1.0);
+    if (column + 1u < body.columns) {
+      position = relaxBond(position, bodyId, index + 1u, body.restCellSize.x, iterationStiffness, 1.0);
     }
     if (row > 0u) {
-      position = relaxBond(position, index - params.restColumns, params.restCellSize.y, iterationStiffness, 1.0);
+      position = relaxBond(position, bodyId, index - body.columns, body.restCellSize.y, iterationStiffness, 1.0);
     }
-    if (row + 1u < params.restRows) {
-      position = relaxBond(position, index + params.restColumns, params.restCellSize.y, iterationStiffness, 1.0);
+    if (row + 1u < body.rows) {
+      position = relaxBond(position, bodyId, index + body.columns, body.restCellSize.y, iterationStiffness, 1.0);
     }
 
     if (column > 0u && row > 0u) {
-      position = relaxBond(position, index - params.restColumns - 1u, diagonalRestDistance, iterationStiffness, 0.75);
+      position = relaxBond(position, bodyId, index - body.columns - 1u, diagonalRestDistance, iterationStiffness, 0.75);
     }
-    if (column + 1u < params.restColumns && row > 0u) {
-      position = relaxBond(position, index - params.restColumns + 1u, diagonalRestDistance, iterationStiffness, 0.75);
+    if (column + 1u < body.columns && row > 0u) {
+      position = relaxBond(position, bodyId, index - body.columns + 1u, diagonalRestDistance, iterationStiffness, 0.75);
     }
-    if (column > 0u && row + 1u < params.restRows) {
-      position = relaxBond(position, index + params.restColumns - 1u, diagonalRestDistance, iterationStiffness, 0.75);
+    if (column > 0u && row + 1u < body.rows) {
+      position = relaxBond(position, bodyId, index + body.columns - 1u, diagonalRestDistance, iterationStiffness, 0.75);
     }
-    if (column + 1u < params.restColumns && row + 1u < params.restRows) {
-      position = relaxBond(position, index + params.restColumns + 1u, diagonalRestDistance, iterationStiffness, 0.75);
+    if (column + 1u < body.columns && row + 1u < body.rows) {
+      position = relaxBond(position, bodyId, index + body.columns + 1u, diagonalRestDistance, iterationStiffness, 0.75);
     }
 
     if (column > 1u) {
-      position = relaxBond(position, index - 2u, params.restCellSize.x * 2.0, iterationStiffness, 0.35);
+      position = relaxBond(position, bodyId, index - 2u, body.restCellSize.x * 2.0, iterationStiffness, 0.35);
     }
-    if (column + 2u < params.restColumns) {
-      position = relaxBond(position, index + 2u, params.restCellSize.x * 2.0, iterationStiffness, 0.35);
+    if (column + 2u < body.columns) {
+      position = relaxBond(position, bodyId, index + 2u, body.restCellSize.x * 2.0, iterationStiffness, 0.35);
     }
     if (row > 1u) {
-      position = relaxBond(position, index - params.restColumns * 2u, params.restCellSize.y * 2.0, iterationStiffness, 0.35);
+      position = relaxBond(position, bodyId, index - body.columns * 2u, body.restCellSize.y * 2.0, iterationStiffness, 0.35);
     }
-    if (row + 2u < params.restRows) {
-      position = relaxBond(position, index + params.restColumns * 2u, params.restCellSize.y * 2.0, iterationStiffness, 0.35);
+    if (row + 2u < body.rows) {
+      position = relaxBond(position, bodyId, index + body.columns * 2u, body.restCellSize.y * 2.0, iterationStiffness, 0.35);
     }
   }
 
@@ -239,6 +279,7 @@ fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> 
 
 fn relaxBond(
   position: vec2<f32>,
+  bodyId: u32,
   otherIndex: u32,
   restDistance: f32,
   iterationStiffness: f32,
@@ -249,6 +290,10 @@ fn relaxBond(
   }
 
   let other = particlesIn[otherIndex];
+  if (!particleActive(other) || particleBodyId(other) != bodyId) {
+    return position;
+  }
+
   let otherPosition = other.position + other.velocity * params.deltaTime;
   let delta = position - otherPosition;
   let distanceSq = dot(delta, delta);
@@ -263,6 +308,14 @@ fn relaxBond(
   let correction = stretch * 0.5 * iterationStiffness * weight;
 
   return position - direction * correction;
+}
+
+fn particleActive(particle: Particle) -> bool {
+  return particle.radius > 0.0;
+}
+
+fn particleBodyId(particle: Particle) -> u32 {
+  return particle.flags & BODY_ID_MASK;
 }
 
 fn particleCell(position: vec2<f32>) -> vec2<u32> {

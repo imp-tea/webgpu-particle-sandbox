@@ -17,14 +17,30 @@
           </div>
           <div class="button-row">
             <button id="pause-button" type="button">Pause</button>
-            <button id="reset-button" type="button">Reset</button>
+            <button id="reset-button" type="button">Clear</button>
           </div>
         </div>
 
         <label>
-          <span>Particles <output id="particle-count-output">10000</output></span>
-          <input id="particle-count" type="range" min="1000" max="50000" step="1000" value="10000" />
+          <span>Body <output id="body-stats-output">0 / 0</output></span>
+          <select id="body-shape">
+            <option value="square">Square</option>
+            <option value="circle">Circle</option>
+            <option value="triangle">Triangle</option>
+          </select>
         </label>
+
+        <label>
+          <span>Size <output id="body-size-output">140</output></span>
+          <input id="body-size" type="range" min="48" max="240" step="8" value="140" />
+        </label>
+
+        <label>
+          <span>Radius <output id="particle-radius-output">3.2</output></span>
+          <input id="particle-radius" type="range" min="1" max="8" step="0.1" value="3.2" />
+        </label>
+
+        <button id="add-body-button" type="button">Add body</button>
 
         <label>
           <span>Gravity <output id="gravity-output">280</output></span>

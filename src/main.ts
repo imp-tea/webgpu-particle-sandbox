@@ -1,12 +1,14 @@
 import "./style.css";
 import { WORKGROUP_SIZE, defaultSettings, type SimulationSettings } from "./config";
 import {
+  createBodyBuffer,
   createGridBuffers,
   createMaterialBuffer,
   createParticleBuffers,
   createUniformBuffer,
   getGridDimensions,
   type MaterialPreset,
+  type SoftBodyShape,
   writeMaterialParams,
   writeSimParams,
   type GridBuffers,
@@ -41,20 +43,35 @@ async function start() {
     const grid = createGridBuffers(gpu.device);
     const uniforms = createUniformBuffer(gpu.device);
     const materials = createMaterialBuffer(gpu.device);
-    const pipelines = createPipelines(gpu.device, gpu.format, particles.buffers, uniforms, grid, materials);
+    const bodies = createBodyBuffer(gpu.device);
+    const pipelines = createPipelines(gpu.device, gpu.format, particles.buffers, uniforms, grid, materials, bodies);
 
     gpu.device.lost.then((info) => {
       statusLabel.textContent = `WebGPU device lost: ${info.message || info.reason}`;
     });
 
     gpu.resize();
-    const world = gpu.getWorldSize();
-    particles.reset(gpu.device, settings.particleCount, world.width, world.height);
+    particles.clear(gpu.device, bodies);
+    settings.particleCount = particles.particleCount;
+    ui.setBodyStats(particles.bodyCount, particles.particleCount);
     statusLabel.textContent = `${gpu.adapter.info?.vendor || "GPU"} adapter ready`;
 
     ui.onReset = () => {
+      particles.clear(gpu.device, bodies);
+      settings.particleCount = particles.particleCount;
+      ui.setBodyStats(particles.bodyCount, particles.particleCount);
+    };
+
+    ui.onAddBody = (shape, bodySize, particleRadius) => {
       const size = gpu.getWorldSize();
-      particles.reset(gpu.device, settings.particleCount, size.width, size.height);
+      const result = particles.addSoftBody(gpu.device, bodies, shape, bodySize, particleRadius, size.width, size.height);
+      if (result.added) {
+        settings.particleCount = result.particleCount;
+        ui.setBodyStats(result.bodyCount, result.particleCount);
+        statusLabel.textContent = `Added ${shape} body (${result.addedParticles.toLocaleString()} particles)`;
+      } else {
+        statusLabel.textContent = result.reason;
+      }
     };
 
     ui.onMaterialPresetChange = (preset) => {
@@ -86,14 +103,13 @@ async function start() {
       const deltaTime = paused ? 0 : elapsed;
       let simulationEncodeMs = 0;
 
-      if (!paused) {
+      if (!paused && settings.particleCount > 0) {
         const substeps = clampSubsteps(settings.substeps);
         const subDeltaTime = deltaTime / substeps;
         const activeGrid = getGridDimensions(size.width, size.height);
         const activeCellCount = activeGrid.columns * activeGrid.rows;
         const cellScanGroups = Math.ceil(activeCellCount / grid.scanBlockSize);
-
-        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, subDeltaTime, particles);
+        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, subDeltaTime);
 
         const simulationStart = performance.now();
         const simulationEncoder = gpu.device.createCommandEncoder({ label: "Simulation command encoder" });
@@ -112,7 +128,7 @@ async function start() {
         gpu.device.queue.submit([simulationEncoder.finish()]);
         simulationEncodeMs = performance.now() - simulationStart;
       } else {
-        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, 0, particles);
+        writeSimParams(gpu.device, uniforms, settings, pointer.state, size.width, size.height, 0);
       }
 
       const renderEncoder = gpu.device.createCommandEncoder({ label: "Render command encoder" });
@@ -189,9 +205,11 @@ async function start() {
 
 type ControlBindings = {
   onReset: () => void;
+  onAddBody: (shape: SoftBodyShape, size: number, particleRadius: number) => void;
   onPauseToggle: () => void;
   onMaterialPresetChange: (preset: MaterialPreset) => void;
   setPaused: (paused: boolean) => void;
+  setBodyStats: (bodyCount: number, particleCount: number) => void;
   setDebugStats: (stats: DebugStats) => void;
 };
 
@@ -204,8 +222,12 @@ type DebugStats = {
 };
 
 function bindControls(settings: SimulationSettings): ControlBindings {
-  const particleCount = getInput("particle-count");
-  const particleCountOutput = getOutput("particle-count-output");
+  const bodyShape = getSelect("body-shape");
+  const bodySize = getInput("body-size");
+  const bodySizeOutput = getOutput("body-size-output");
+  const particleRadius = getInput("particle-radius");
+  const particleRadiusOutput = getOutput("particle-radius-output");
+  const bodyStats = getOutput("body-stats-output");
   const gravity = getInput("gravity");
   const gravityOutput = getOutput("gravity-output");
   const damping = getInput("damping");
@@ -227,13 +249,18 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   const materialPreset = getSelect("material-preset");
   const pauseButton = getButton("pause-button");
   const resetButton = getButton("reset-button");
+  const addBodyButton = getButton("add-body-button");
 
   const bindings: ControlBindings = {
     onReset: () => undefined,
+    onAddBody: () => undefined,
     onPauseToggle: () => undefined,
     onMaterialPresetChange: () => undefined,
     setPaused(paused: boolean) {
       pauseButton.textContent = paused ? "Resume" : "Pause";
+    },
+    setBodyStats(bodyCount: number, particleCount: number) {
+      bodyStats.value = `${bodyCount.toLocaleString()} / ${particleCount.toLocaleString()}`;
     },
     setDebugStats(stats) {
       const overflow = stats.gridOverflow > 0 ? ` | overflow ${stats.gridOverflow.toLocaleString()}` : "";
@@ -241,7 +268,6 @@ function bindControls(settings: SimulationSettings): ControlBindings {
     }
   };
 
-  particleCount.value = String(settings.particleCount);
   gravity.value = String(settings.gravityY);
   damping.value = String(settings.damping);
   substeps.value = String(settings.substeps);
@@ -253,7 +279,8 @@ function bindControls(settings: SimulationSettings): ControlBindings {
   cohesion.value = String(settings.cohesion);
 
   const refresh = () => {
-    particleCountOutput.value = settings.particleCount.toLocaleString();
+    bodySizeOutput.value = bodySize.valueAsNumber.toFixed(0);
+    particleRadiusOutput.value = particleRadius.valueAsNumber.toFixed(1);
     gravityOutput.value = settings.gravityY.toFixed(0);
     dampingOutput.value = settings.damping.toFixed(2);
     substepsOutput.value = clampSubsteps(settings.substeps).toFixed(0);
@@ -265,11 +292,13 @@ function bindControls(settings: SimulationSettings): ControlBindings {
     cohesionOutput.value = settings.cohesion.toFixed(2);
   };
 
-  particleCount.addEventListener("input", () => {
-    settings.particleCount = particleCount.valueAsNumber;
+  bodySize.addEventListener("input", () => {
     refresh();
   });
-  particleCount.addEventListener("change", () => bindings.onReset());
+
+  particleRadius.addEventListener("input", () => {
+    refresh();
+  });
 
   gravity.addEventListener("input", () => {
     settings.gravityY = gravity.valueAsNumber;
@@ -322,6 +351,10 @@ function bindControls(settings: SimulationSettings): ControlBindings {
 
   pauseButton.addEventListener("click", () => bindings.onPauseToggle());
   resetButton.addEventListener("click", () => bindings.onReset());
+  addBodyButton.addEventListener("click", () =>
+    bindings.onAddBody(bodyShape.value as SoftBodyShape, bodySize.valueAsNumber, particleRadius.valueAsNumber)
+  );
+  bindings.setBodyStats(0, settings.particleCount);
   refresh();
   return bindings;
 }

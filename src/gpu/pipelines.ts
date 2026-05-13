@@ -34,7 +34,8 @@ export function createPipelines(
   particleBuffers: [GPUBuffer, GPUBuffer],
   uniformBuffer: GPUBuffer,
   gridBuffers: GridBuffers,
-  materialBuffer: GPUBuffer
+  materialBuffer: GPUBuffer,
+  bodyBuffer: GPUBuffer
 ): Pipelines {
   const clearGridBindGroupLayout = device.createBindGroupLayout({
     label: "Clear grid bind group layout",
@@ -232,6 +233,11 @@ export function createPipelines(
       },
       {
         binding: 6,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: "read-only-storage" }
+      },
+      {
+        binding: 7,
         visibility: GPUShaderStage.COMPUTE,
         buffer: { type: "read-only-storage" }
       }
@@ -521,6 +527,7 @@ export function createPipelines(
       gridBuffers.cellStarts,
       gridBuffers.pairValues,
       materialBuffer,
+      bodyBuffer,
       "A to B"
     ),
     createSimulateBindGroup(
@@ -533,6 +540,7 @@ export function createPipelines(
       gridBuffers.cellStarts,
       gridBuffers.pairValues,
       materialBuffer,
+      bodyBuffer,
       "B to A"
     )
   ];
@@ -618,6 +626,7 @@ function createSimulateBindGroup(
   cellStarts: GPUBuffer,
   pairValues: GPUBuffer,
   materialBuffer: GPUBuffer,
+  bodyBuffer: GPUBuffer,
   label: string
 ) {
   return device.createBindGroup({
@@ -630,7 +639,8 @@ function createSimulateBindGroup(
       { binding: 3, resource: { buffer: cellCounts } },
       { binding: 4, resource: { buffer: cellStarts } },
       { binding: 5, resource: { buffer: pairValues } },
-      { binding: 6, resource: { buffer: materialBuffer } }
+      { binding: 6, resource: { buffer: materialBuffer } },
+      { binding: 7, resource: { buffer: bodyBuffer } }
     ]
   });
 }

@@ -39,14 +39,14 @@ body {
 
 #controls {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  width: min(420px, calc(100vw - 32px));
-  max-height: calc(100vh - 32px);
+  top: 10px;
+  left: 10px;
+  width: min(240px, calc(100vw - 20px));
+  max-height: calc(100vh - 20px);
   overflow-y: auto;
   display: grid;
-  gap: 14px;
-  padding: 16px;
+  gap: 8px;
+  padding: 9px;
   border: 1px solid rgb(255 255 255 / 13%);
   border-radius: 8px;
   background: rgb(11 14 16 / 78%);
@@ -58,20 +58,21 @@ body {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px;
 }
 
 h1 {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 0.82rem;
   line-height: 1.2;
   letter-spacing: 0;
 }
 
 p {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   color: #9fb0b5;
-  font-size: 0.82rem;
+  font-size: 0.68rem;
+  line-height: 1.25;
 }
 
 #debug-stats {
@@ -81,19 +82,19 @@ p {
 
 .button-row {
   display: flex;
-  gap: 8px;
+  gap: 5px;
   flex: none;
 }
 
 button {
-  min-height: 34px;
-  padding: 0 13px;
+  min-height: 25px;
+  padding: 0 8px;
   border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 6px;
   color: #eef5f6;
   background: #283139;
   font: inherit;
-  font-size: 0.86rem;
+  font-size: 0.72rem;
   cursor: pointer;
 }
 
@@ -104,16 +105,16 @@ button:hover {
 
 label {
   display: grid;
-  gap: 7px;
+  gap: 4px;
   color: #dce9eb;
-  font-size: 0.86rem;
+  font-size: 0.72rem;
 }
 
 label span {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 output {
@@ -128,14 +129,14 @@ input[type="range"] {
 
 select {
   width: 100%;
-  min-height: 34px;
-  padding: 0 10px;
+  min-height: 26px;
+  padding: 0 8px;
   border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 6px;
   color: #eef5f6;
   background: #182027;
   font: inherit;
-  font-size: 0.86rem;
+  font-size: 0.72rem;
 }
 
 select:focus {
@@ -145,18 +146,12 @@ select:focus {
 
 @media (max-width: 720px) {
   #controls {
-    top: 10px;
-    left: 10px;
-    width: calc(100vw - 20px);
-    max-height: calc(100vh - 20px);
-    padding: 12px;
-    gap: 11px;
+    width: min(240px, calc(100vw - 20px));
   }
 
   .title-row {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 10px;
+    align-items: flex-start;
+    flex-direction: row;
   }
 
   .button-row {

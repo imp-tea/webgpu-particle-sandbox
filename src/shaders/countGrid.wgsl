@@ -45,6 +45,10 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
   }
 
   let particle = particles[particleIndex];
+  if (particle.radius <= 0.0) {
+    return;
+  }
+
   let cell = particleCell(particle.position);
   let cellIndex = cell.y * params.gridColumns + cell.x;
   let occupancy = atomicAdd(&cellCounts[cellIndex], 1u) + 1u;

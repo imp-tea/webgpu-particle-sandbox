@@ -1,10 +1,12 @@
 import {
+  BODY_STRIDE_BYTES,
   DEBUG_COUNTER_BYTES,
   DEFAULT_CONFIG,
   GRID_CELL_SIZE,
   GRID_PARTICLE_CAPACITY,
   MATERIAL_COUNT,
   MATERIAL_STRIDE_BYTES,
+  MAX_BODIES,
   MAX_GRID_CELLS,
   MAX_GRID_COLUMNS,
   MAX_GRID_ROWS,
@@ -16,17 +18,41 @@ import {
 } from "../config";
 import type { PointerState } from "../input";
 
+export type SoftBodyShape = "square" | "circle" | "triangle";
+
+const INACTIVE_PARTICLE_FLAG = 0x80000000;
+const BODY_ID_MASK = 0x0000ffff;
+
 export type ParticleBuffers = {
   buffers: [GPUBuffer, GPUBuffer];
   activeIndex: number;
   maxParticles: number;
-  restColumns: number;
-  restRows: number;
-  restCellWidth: number;
-  restCellHeight: number;
-  reset: (device: GPUDevice, count: number, worldWidth: number, worldHeight: number) => void;
+  particleCount: number;
+  bodyCount: number;
+  clear: (device: GPUDevice, bodyBuffer: GPUBuffer) => void;
+  addSoftBody: (
+    device: GPUDevice,
+    bodyBuffer: GPUBuffer,
+    shape: SoftBodyShape,
+    size: number,
+    particleRadius: number,
+    worldWidth: number,
+    worldHeight: number
+  ) => SoftBodyAddResult;
   swap: () => void;
 };
+
+export type SoftBodyAddResult =
+  | {
+      added: true;
+      particleCount: number;
+      bodyCount: number;
+      addedParticles: number;
+    }
+  | {
+      added: false;
+      reason: string;
+    };
 
 export type GridBuffers = {
   pairValues: GPUBuffer;
@@ -63,24 +89,59 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
     buffers,
     activeIndex: 0,
     maxParticles,
-    restColumns: 1,
-    restRows: 1,
-    restCellWidth: 1,
-    restCellHeight: 1,
-    reset(device, count, worldWidth, worldHeight) {
-      const initial = createInitialParticleData(count, worldWidth, worldHeight);
-      device.queue.writeBuffer(buffers[0], 0, initial.data);
-      device.queue.writeBuffer(buffers[1], 0, initial.data);
-      this.restColumns = initial.columns;
-      this.restRows = initial.rows;
-      this.restCellWidth = initial.cellWidth;
-      this.restCellHeight = initial.cellHeight;
+    particleCount: 0,
+    bodyCount: 0,
+    clear(device, bodyBuffer) {
+      this.particleCount = 0;
+      this.bodyCount = 0;
       this.activeIndex = 0;
+      device.queue.writeBuffer(bodyBuffer, 0, new ArrayBuffer(MAX_BODIES * BODY_STRIDE_BYTES));
+    },
+    addSoftBody(device, bodyBuffer, shape, size, particleRadius, worldWidth, worldHeight) {
+      if (this.bodyCount >= MAX_BODIES) {
+        return { added: false, reason: `Body limit reached (${MAX_BODIES}).` };
+      }
+
+      const body = createSoftBodyData({
+        shape,
+        size,
+        particleRadius,
+        bodyId: this.bodyCount,
+        startIndex: this.particleCount,
+        worldWidth,
+        worldHeight
+      });
+
+      if (this.particleCount + body.particleCount > this.maxParticles) {
+        return { added: false, reason: `Particle limit reached (${this.maxParticles.toLocaleString()}).` };
+      }
+
+      const particleOffset = this.particleCount * PARTICLE_STRIDE_BYTES;
+      device.queue.writeBuffer(buffers[0], particleOffset, body.particleData);
+      device.queue.writeBuffer(buffers[1], particleOffset, body.particleData);
+      device.queue.writeBuffer(bodyBuffer, this.bodyCount * BODY_STRIDE_BYTES, body.bodyData);
+
+      this.particleCount += body.particleCount;
+      this.bodyCount += 1;
+      return {
+        added: true,
+        particleCount: this.particleCount,
+        bodyCount: this.bodyCount,
+        addedParticles: body.particleCount
+      };
     },
     swap() {
       this.activeIndex = 1 - this.activeIndex;
     }
   };
+}
+
+export function createBodyBuffer(device: GPUDevice): GPUBuffer {
+  return device.createBuffer({
+    label: "Soft body metadata",
+    size: MAX_BODIES * BODY_STRIDE_BYTES,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  });
 }
 
 export function createUniformBuffer(device: GPUDevice): GPUBuffer {
@@ -265,8 +326,7 @@ export function writeSimParams(
   pointer: PointerState,
   worldWidth: number,
   worldHeight: number,
-  deltaTime: number,
-  restLayout: Pick<ParticleBuffers, "restColumns" | "restRows" | "restCellWidth" | "restCellHeight">
+  deltaTime: number
 ) {
   const data = new ArrayBuffer(SIM_PARAMS_BYTES);
   const view = new DataView(data);
@@ -293,52 +353,105 @@ export function writeSimParams(
   view.setFloat32(64, settings.cohesion, true);
   view.setFloat32(68, settings.softBodyStrength, true);
   view.setFloat32(72, settings.viscosity, true);
-  view.setUint32(76, restLayout.restColumns, true);
-  view.setUint32(80, restLayout.restRows, true);
+  view.setUint32(76, 0, true);
+  view.setUint32(80, 0, true);
   view.setUint32(84, settings.bondIterations, true);
-  view.setFloat32(88, restLayout.restCellWidth, true);
-  view.setFloat32(92, restLayout.restCellHeight, true);
+  view.setFloat32(88, 1, true);
+  view.setFloat32(92, 1, true);
 
   device.queue.writeBuffer(uniformBuffer, 0, data);
 }
 
-function createInitialParticleData(count: number, worldWidth: number, worldHeight: number) {
-  const data = new ArrayBuffer(count * PARTICLE_STRIDE_BYTES);
-  const view = new DataView(data);
-  const rng = mulberry32(0x5eed1234);
-  const columns = Math.ceil(Math.sqrt(count * (worldWidth / Math.max(1, worldHeight))));
-  const rows = Math.ceil(count / columns);
-  const spawnWidth = worldWidth * 0.72;
-  const spawnHeight = worldHeight * 0.58;
-  const startX = (worldWidth - spawnWidth) * 0.5;
-  const startY = (worldHeight - spawnHeight) * 0.28;
-  const cellWidth = spawnWidth / Math.max(1, columns);
-  const cellHeight = spawnHeight / Math.max(1, rows);
-  const radius = Math.max(1.35, Math.min(3.25, Math.min(cellWidth, cellHeight) * 0.32));
+type SoftBodyDataOptions = {
+  shape: SoftBodyShape;
+  size: number;
+  particleRadius: number;
+  bodyId: number;
+  startIndex: number;
+  worldWidth: number;
+  worldHeight: number;
+};
 
-  for (let i = 0; i < count; i += 1) {
-    const column = i % columns;
-    const row = Math.floor(i / columns);
-    const jitterX = (rng() - 0.5) * cellWidth * 0.55;
-    const jitterY = (rng() - 0.5) * cellHeight * 0.55;
-    const x = startX + (column + 0.5) * cellWidth + jitterX;
-    const y = startY + (row + 0.5) * cellHeight + jitterY;
-    const angle = rng() * Math.PI * 2;
-    const speed = rng() * 18;
-    const materialId = i % 4;
-    const offset = i * PARTICLE_STRIDE_BYTES;
+function createSoftBodyData(options: SoftBodyDataOptions) {
+  const size = Math.max(40, Math.min(260, options.size));
+  const columns = Math.max(6, Math.min(34, Math.round(size / 8)));
+  const rows = columns;
+  const particleCount = columns * rows;
+  const particleData = new ArrayBuffer(particleCount * PARTICLE_STRIDE_BYTES);
+  const bodyData = new ArrayBuffer(BODY_STRIDE_BYTES);
+  const particleView = new DataView(particleData);
+  const bodyView = new DataView(bodyData);
+  const rng = mulberry32(0x5eed1234 + options.bodyId * 0x9e3779b9);
+  const center = pickBodyCenter(options.bodyId, size, options.worldWidth, options.worldHeight);
+  const halfSize = size * 0.5;
+  const restCellWidth = size / Math.max(1, columns - 1);
+  const restCellHeight = size / Math.max(1, rows - 1);
+  const radius = Math.max(1, Math.min(8, options.particleRadius));
+  const materialId = options.bodyId % MATERIAL_COUNT;
 
-    view.setFloat32(offset, x, true);
-    view.setFloat32(offset + 4, y, true);
-    view.setFloat32(offset + 8, Math.cos(angle) * speed, true);
-    view.setFloat32(offset + 12, Math.sin(angle) * speed, true);
-    view.setUint32(offset + 16, materialId, true);
-    view.setUint32(offset + 20, 0, true);
-    view.setFloat32(offset + 24, radius, true);
-    view.setFloat32(offset + 28, radius * radius, true);
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const localIndex = row * columns + column;
+      const offset = localIndex * PARTICLE_STRIDE_BYTES;
+      const normalizedX = ((column + 0.5) / columns - 0.5) * 2;
+      const normalizedY = ((row + 0.5) / rows - 0.5) * 2;
+      const active = isShapeCellActive(options.shape, normalizedX, normalizedY);
+      const position = {
+        x: normalizedX * halfSize,
+        y: normalizedY * halfSize
+      };
+      const jitterX = active ? (rng() - 0.5) * restCellWidth * 0.12 : 0;
+      const jitterY = active ? (rng() - 0.5) * restCellHeight * 0.12 : 0;
+      const angle = rng() * Math.PI * 2;
+      const speed = active ? rng() * 8 : 0;
+      const particleRadius = active ? radius : 0;
+      const bodyId = options.bodyId & BODY_ID_MASK;
+      const flags = active ? bodyId : bodyId + INACTIVE_PARTICLE_FLAG;
+
+      particleView.setFloat32(offset, center.x + position.x + jitterX, true);
+      particleView.setFloat32(offset + 4, center.y + position.y + jitterY, true);
+      particleView.setFloat32(offset + 8, Math.cos(angle) * speed, true);
+      particleView.setFloat32(offset + 12, Math.sin(angle) * speed, true);
+      particleView.setUint32(offset + 16, materialId, true);
+      particleView.setUint32(offset + 20, flags, true);
+      particleView.setFloat32(offset + 24, particleRadius, true);
+      particleView.setFloat32(offset + 28, particleRadius * particleRadius, true);
+    }
   }
 
-  return { data, columns, rows, cellWidth, cellHeight };
+  bodyView.setUint32(0, options.startIndex, true);
+  bodyView.setUint32(4, particleCount, true);
+  bodyView.setUint32(8, columns, true);
+  bodyView.setUint32(12, rows, true);
+  bodyView.setFloat32(16, restCellWidth, true);
+  bodyView.setFloat32(20, restCellHeight, true);
+
+  return { particleData, bodyData, particleCount };
+}
+
+function isShapeCellActive(shape: SoftBodyShape, normalizedX: number, normalizedY: number) {
+  if (shape === "circle") {
+    return normalizedX * normalizedX + normalizedY * normalizedY <= 1;
+  }
+
+  if (shape === "triangle") {
+    const vertical = (normalizedY + 1) * 0.5;
+    return Math.abs(normalizedX) <= Math.max(0.12, vertical);
+  }
+
+  return true;
+}
+
+function pickBodyCenter(bodyId: number, size: number, worldWidth: number, worldHeight: number) {
+  const margin = Math.max(32, size * 0.58);
+  const controlClearance = worldWidth > 700 ? 340 : worldWidth > 560 ? 280 : 0;
+  const availableWidth = Math.max(1, worldWidth - controlClearance - margin * 2);
+  const availableHeight = Math.max(1, worldHeight * 0.42 - margin);
+
+  return {
+    x: controlClearance + margin + ((bodyId * 173) % availableWidth),
+    y: margin + ((bodyId * 67) % availableHeight)
+  };
 }
 
 function mulberry32(seed: number) {
