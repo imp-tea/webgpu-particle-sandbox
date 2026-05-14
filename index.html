@@ -30,7 +30,13 @@
             <option value="rectangle">Rectangle</option>
             <option value="circle">Circle</option>
             <option value="triangle">Triangle</option>
+            <option value="svg">SVG</option>
           </select>
+        </label>
+
+        <label id="svg-file-control" hidden>
+          <span>SVG file</span>
+          <input id="svg-file" type="file" accept=".svg,image/svg+xml" />
         </label>
 
         <p id="property-mode">Editing spawn properties</p>
@@ -45,7 +51,7 @@
 
         <label>
           <span>Size <output id="body-size-output">120</output></span>
-          <input id="body-size" type="range" min="48" max="240" step="8" value="120" />
+          <input id="body-size" type="range" min="48" max="480" step="8" value="120" />
         </label>
 
         <label>
@@ -96,8 +102,8 @@
         </label>
 
         <label id="motor-strength-control" hidden>
-          <span>Motor strength <output id="motor-strength-output">88</output></span>
-          <input id="motor-strength" type="range" min="0" max="240" step="1" value="88" />
+          <span>Motor strength <output id="motor-strength-output">500</output></span>
+          <input id="motor-strength" type="range" min="0" max="500" step="1" value="500" />
         </label>
 
         <label>

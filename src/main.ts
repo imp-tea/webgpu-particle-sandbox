@@ -12,6 +12,7 @@ import {
   getGridDimensions,
   type BodyProperties,
   type JointDefinition,
+  type SampledBodyPoint,
   type SoftBodyShape,
   writeJointBuffer,
   writeSimParams,
@@ -37,6 +38,7 @@ const vectorCanvas: HTMLCanvasElement = vectorCanvasElement;
 const statusLabel: HTMLElement = statusElement;
 const debugLabel: HTMLElement = debugElement;
 const dragBand: HTMLElement = dragBandElement;
+const defaultSvgUrl = new URL("../test.svg", import.meta.url).href;
 
 void start();
 
@@ -129,9 +131,49 @@ async function start() {
       ui.setBodyStats(particles.bodyCount, particles.particleCount);
     };
 
-    ui.onAddBody = (shape, bodySize, particleRadius) => {
+    ui.onAddBody = async (shape, bodySize, particleRadius, svgFile) => {
       const size = gpu.getWorldSize();
       const properties = ui.getSpawnBodyProperties();
+      if (shape === "svg") {
+        statusLabel.textContent = "Sampling SVG body...";
+        try {
+          const source = await createSvgBodySource(svgFile, bodySize, particleRadius);
+          const result = particles.addSampledBody(
+            gpu.device,
+            bodies,
+            bonds,
+            restShapes,
+            source.points,
+            source.size,
+            source.spacing,
+            particleRadius,
+            properties,
+            size.width,
+            size.height
+          );
+          if (result.added) {
+            bodyProperties.push({ ...properties });
+            bodyRenderInfos.push({
+              bodyId: result.bodyId,
+              startIndex: result.startIndex,
+              particleCount: result.addedParticles,
+              perimeterParticleCount: result.perimeterParticleCount,
+              particleRadius: result.particleRadius,
+              materialId: result.materialId,
+              svgRender: source.render
+            });
+            settings.particleCount = result.particleCount;
+            ui.setBodyStats(result.bodyCount, result.particleCount);
+            statusLabel.textContent = `Added SVG body (${result.addedParticles.toLocaleString()} particles)`;
+          } else {
+            statusLabel.textContent = result.reason;
+          }
+        } catch (error) {
+          statusLabel.textContent = error instanceof Error ? error.message : String(error);
+        }
+        return;
+      }
+
       const result = particles.addSoftBody(
         gpu.device,
         bodies,
@@ -149,6 +191,7 @@ async function start() {
         bodyRenderInfos.push({
           bodyId: result.bodyId,
           startIndex: result.startIndex,
+          particleCount: result.addedParticles,
           perimeterParticleCount: result.perimeterParticleCount,
           particleRadius: result.particleRadius,
           materialId: result.materialId
@@ -336,7 +379,7 @@ async function start() {
         colorAttachments: [
           {
             view: gpu.context.getCurrentTexture().createView(),
-            clearValue: { r: 0.025, g: 0.03, b: 0.035, a: 1 },
+            clearValue: { r: 0.051, g: 0.09, b: 0.137, a: 1 },
             loadOp: "clear",
             storeOp: "store"
           }
@@ -402,7 +445,7 @@ async function start() {
 
 type ControlBindings = {
   onReset: () => void;
-  onAddBody: (shape: SoftBodyShape, size: number, particleRadius: number) => void;
+  onAddBody: (shape: BodyShapeChoice, size: number, particleRadius: number, svgFile?: File) => void | Promise<void>;
   onBodyPropertiesChange: (bodyId: number | undefined, properties: BodyProperties) => void;
   onPauseToggle: () => void;
   getRenderMode: () => RenderMode;
@@ -414,14 +457,33 @@ type ControlBindings = {
 };
 
 type RenderMode = "particles" | "vectors";
+type BodyShapeChoice = SoftBodyShape | "svg";
 
 type BodyRenderInfo = {
   bodyId: number;
   startIndex: number;
+  particleCount: number;
   perimeterParticleCount: number;
   particleRadius: number;
   materialId: number;
+  svgRender?: SvgRenderInfo;
 };
+
+type SvgRenderInfo = {
+  image: HTMLCanvasElement;
+  points: SvgRenderPoint[];
+  triangles: SvgTriangle[];
+};
+
+type SvgRenderPoint = {
+  x: number;
+  y: number;
+  sourceX: number;
+  sourceY: number;
+};
+
+type SvgTriangle = [number, number, number];
+type SvgSamplePoint = SampledBodyPoint & SvgRenderPoint;
 
 type DebugStats = {
   substeps: number;
@@ -440,7 +502,8 @@ type VehicleController = {
 };
 
 function createVehicleController(): VehicleController {
-  const defaultMotorStrength = 88;
+  const maxMotorStrength = 500;
+  const defaultMotorStrength = maxMotorStrength;
   const keys = new Set<string>();
   const motorStrengths = new Map<number, number>();
   let leftWheelBodyId: number | undefined;
@@ -479,7 +542,7 @@ function createVehicleController(): VehicleController {
         return;
       }
 
-      motorStrengths.set(bodyId, Math.max(0, motorStrength));
+      motorStrengths.set(bodyId, Math.min(maxMotorStrength, Math.max(0, motorStrength)));
     },
     updateMotors(device, particles, bodyBuffer) {
       const driveAxis = (keys.has("KeyD") ? 1 : 0) - (keys.has("KeyA") ? 1 : 0);
@@ -524,6 +587,10 @@ function addVehicleScene(
     viscosity: settings.viscosity,
     friction: settings.friction
   };
+  const wheelBodyProperties = {
+    ...defaultBodyProperties,
+    friction: 1
+  };
 
   const chassis = addSceneBody(
     device,
@@ -549,7 +616,7 @@ function addVehicleScene(
     "circle",
     wheelSize,
     vehicleParticleRadius,
-    defaultBodyProperties,
+    wheelBodyProperties,
     worldSize,
     { x: centerX - wheelOffset, y: wheelCenterY },
     bodyProperties,
@@ -564,7 +631,7 @@ function addVehicleScene(
     "circle",
     wheelSize,
     vehicleParticleRadius,
-    defaultBodyProperties,
+    wheelBodyProperties,
     worldSize,
     { x: centerX + wheelOffset, y: wheelCenterY },
     bodyProperties,
@@ -639,6 +706,7 @@ function addSceneBody(
   bodyRenderInfos.push({
     bodyId: result.bodyId,
     startIndex: result.startIndex,
+    particleCount: result.addedParticles,
     perimeterParticleCount: result.perimeterParticleCount,
     particleRadius: result.particleRadius,
     materialId: result.materialId
@@ -647,8 +715,306 @@ function addSceneBody(
   return result;
 }
 
+type SvgBodySource = {
+  points: SampledBodyPoint[];
+  size: number;
+  spacing: number;
+  render: SvgRenderInfo;
+};
+
+type SvgRaster = {
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+  canvas: HTMLCanvasElement;
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+};
+
+async function createSvgBodySource(file: File | undefined, requestedSize: number, particleRadius: number): Promise<SvgBodySource> {
+  const svgText = file ? await file.text() : await fetchDefaultSvg();
+  const image = await loadSvgImage(svgText);
+  const raster = rasterizeSvg(image);
+  const size = Math.max(40, Math.min(480, requestedSize));
+  const targetAcross = Math.max(6, Math.min(34, Math.round(size / 8)));
+  const spacing = size / Math.max(1, targetAcross - 1);
+  const maskWidth = raster.maxX - raster.minX + 1;
+  const maskHeight = raster.maxY - raster.minY + 1;
+  const scale = size / Math.max(maskWidth, maskHeight);
+  const localWidth = maskWidth * scale;
+  const localHeight = maskHeight * scale;
+  const rowSpacing = spacing * Math.sqrt(3) * 0.5;
+  const columns = Math.ceil(localWidth / spacing) + 3;
+  const rows = Math.ceil(localHeight / rowSpacing) + 3;
+  const boundaryPoints: SvgSamplePoint[] = [];
+  const interiorCandidates: SvgSamplePoint[] = [];
+  const sampleStep = Math.max(1, (particleRadius * 0.75) / scale);
+
+  for (let row = 0; row < rows; row += 1) {
+    const y = (row - (rows - 1) * 0.5) * rowSpacing;
+    const rowOffset = row % 2 === 0 ? 0 : spacing * 0.5;
+
+    for (let column = 0; column < columns; column += 1) {
+      const x = (column - (columns - 1) * 0.5) * spacing + rowOffset;
+      const sample = sampleSvgRaster(raster, x, y, scale);
+      if (!sample.inside) {
+        continue;
+      }
+
+      const point = {
+        x,
+        y,
+        boundary: isSvgBoundarySample(raster, x, y, scale, sampleStep),
+        color: sample.color,
+        sourceX: sample.sourceX,
+        sourceY: sample.sourceY
+      };
+      if (point.boundary) {
+        boundaryPoints.push(point);
+      } else {
+        interiorCandidates.push(point);
+      }
+    }
+  }
+
+  const minInteriorDistanceSq = spacing * spacing * 0.62 * 0.62;
+  const interiorPoints = interiorCandidates.filter((point) => !isTooCloseToPoints(point, boundaryPoints, minInteriorDistanceSq));
+  const points = [...boundaryPoints, ...interiorPoints];
+  if (points.length === 0) {
+    throw new Error("SVG did not produce any filled particles.");
+  }
+
+  const renderPoints = points.map((point) => ({
+    x: point.x,
+    y: point.y,
+    sourceX: point.sourceX,
+    sourceY: point.sourceY
+  }));
+
+  return {
+    points,
+    size,
+    spacing,
+    render: {
+      image: raster.canvas,
+      points: renderPoints,
+      triangles: createSvgRenderTriangles(renderPoints, spacing)
+    }
+  };
+}
+
+async function fetchDefaultSvg() {
+  const response = await fetch(defaultSvgUrl);
+  if (!response.ok) {
+    throw new Error("Could not load default test.svg.");
+  }
+  return response.text();
+}
+
+async function loadSvgImage(svgText: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([svgText], { type: "image/svg+xml" }));
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not decode SVG image."));
+    };
+    image.src = url;
+  });
+}
+
+function rasterizeSvg(image: HTMLImageElement): SvgRaster {
+  const maxRasterSize = 640;
+  const sourceWidth = Math.max(1, image.naturalWidth || maxRasterSize);
+  const sourceHeight = Math.max(1, image.naturalHeight || maxRasterSize);
+  const aspect = sourceWidth / sourceHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = aspect >= 1 ? maxRasterSize : Math.max(1, Math.round(maxRasterSize * aspect));
+  canvas.height = aspect >= 1 ? Math.max(1, Math.round(maxRasterSize / aspect)) : maxRasterSize;
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    throw new Error("Could not create SVG sampling canvas.");
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const bounds = findAlphaBounds(imageData.data, canvas.width, canvas.height);
+  if (!bounds) {
+    throw new Error("SVG has no visible pixels to sample.");
+  }
+
+  return {
+    data: imageData.data,
+    width: canvas.width,
+    height: canvas.height,
+    canvas,
+    ...bounds
+  };
+}
+
+function findAlphaBounds(data: Uint8ClampedArray, width: number, height: number) {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (alphaAt(data, width, height, x, y) <= 12) {
+        continue;
+      }
+
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  return maxX < minX || maxY < minY ? undefined : { minX, minY, maxX, maxY };
+}
+
+function sampleSvgRaster(raster: SvgRaster, localX: number, localY: number, scale: number) {
+  const pixel = localToSvgPixel(raster, localX, localY, scale);
+  const x = Math.round(pixel.x);
+  const y = Math.round(pixel.y);
+  const alpha = alphaAt(raster.data, raster.width, raster.height, x, y);
+  return {
+    inside: alpha > 24,
+    color: colorAt(raster.data, raster.width, raster.height, x, y),
+    sourceX: pixel.x,
+    sourceY: pixel.y
+  };
+}
+
+function isSvgBoundarySample(raster: SvgRaster, localX: number, localY: number, scale: number, sampleStep: number) {
+  const pixel = localToSvgPixel(raster, localX, localY, scale);
+  const offsets = [
+    { x: sampleStep, y: 0 },
+    { x: -sampleStep, y: 0 },
+    { x: 0, y: sampleStep },
+    { x: 0, y: -sampleStep },
+    { x: sampleStep, y: sampleStep },
+    { x: -sampleStep, y: sampleStep },
+    { x: sampleStep, y: -sampleStep },
+    { x: -sampleStep, y: -sampleStep }
+  ];
+
+  for (const offset of offsets) {
+    const x = Math.round(pixel.x + offset.x);
+    const y = Math.round(pixel.y + offset.y);
+    if (alphaAt(raster.data, raster.width, raster.height, x, y) <= 24) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function localToSvgPixel(raster: SvgRaster, localX: number, localY: number, scale: number) {
+  return {
+    x: (raster.minX + raster.maxX) * 0.5 + localX / scale,
+    y: (raster.minY + raster.maxY) * 0.5 + localY / scale
+  };
+}
+
+function alphaAt(data: Uint8ClampedArray, width: number, height: number, x: number, y: number) {
+  if (x < 0 || y < 0 || x >= width || y >= height) {
+    return 0;
+  }
+
+  return data[(y * width + x) * 4 + 3];
+}
+
+function colorAt(data: Uint8ClampedArray, width: number, height: number, x: number, y: number) {
+  if (x < 0 || y < 0 || x >= width || y >= height) {
+    return 0xffffff;
+  }
+
+  const offset = (y * width + x) * 4;
+  return (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2];
+}
+
+function isTooCloseToPoints(point: SampledBodyPoint, neighbors: SampledBodyPoint[], minDistanceSq: number) {
+  for (const neighbor of neighbors) {
+    const dx = point.x - neighbor.x;
+    const dy = point.y - neighbor.y;
+    if (dx * dx + dy * dy < minDistanceSq) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function createSvgRenderTriangles(points: SvgRenderPoint[], spacing: number): SvgTriangle[] {
+  const maxEdge = spacing * 1.35;
+  const maxEdgeSq = maxEdge * maxEdge;
+  const neighbors = points.map(() => [] as number[]);
+  const triangleKeys = new Set<string>();
+  const triangles: SvgTriangle[] = [];
+
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      if (distanceSq(points[i], points[j]) <= maxEdgeSq) {
+        neighbors[i].push(j);
+        neighbors[j].push(i);
+      }
+    }
+  }
+
+  for (let i = 0; i < points.length; i += 1) {
+    const localNeighbors = neighbors[i];
+    for (let a = 0; a < localNeighbors.length; a += 1) {
+      for (let b = a + 1; b < localNeighbors.length; b += 1) {
+        const j = localNeighbors[a];
+        const k = localNeighbors[b];
+        if (distanceSq(points[j], points[k]) > maxEdgeSq) {
+          continue;
+        }
+
+        const area = Math.abs(triangleArea(points[i], points[j], points[k]));
+        if (area < spacing * spacing * 0.08) {
+          continue;
+        }
+
+        const ordered = [i, j, k].sort((left, right) => left - right) as SvgTriangle;
+        const key = ordered.join(":");
+        if (triangleKeys.has(key)) {
+          continue;
+        }
+
+        triangleKeys.add(key);
+        triangles.push(ordered);
+      }
+    }
+  }
+
+  return triangles;
+}
+
+function distanceSq(a: { x: number; y: number }, b: { x: number; y: number }) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
+}
+
+function triangleArea(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
 function bindControls(settings: SimulationSettings, vehicle: VehicleController): ControlBindings {
   const bodyShape = getSelect("body-shape");
+  const svgFileControl = getElement("svg-file-control");
+  const svgFile = getFileInput("svg-file");
   const renderMode = getSelect("render-mode");
   const bodySize = getInput("body-size");
   const bodySizeOutput = getOutput("body-size-output");
@@ -750,6 +1116,7 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
   mouseForce.value = String(settings.mouseForce);
 
   const refresh = () => {
+    svgFileControl.hidden = bodyShape.value !== "svg";
     bodySizeOutput.value = bodySize.valueAsNumber.toFixed(0);
     particleRadiusOutput.value = particleRadius.valueAsNumber.toFixed(1);
     gravityOutput.value = settings.gravityY.toFixed(0);
@@ -766,6 +1133,10 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
   };
 
   bodySize.addEventListener("input", () => {
+    refresh();
+  });
+
+  bodyShape.addEventListener("change", () => {
     refresh();
   });
 
@@ -839,9 +1210,14 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
 
   pauseButton.addEventListener("click", () => bindings.onPauseToggle());
   resetButton.addEventListener("click", () => bindings.onReset());
-  addBodyButton.addEventListener("click", () =>
-    bindings.onAddBody(bodyShape.value as SoftBodyShape, bodySize.valueAsNumber, particleRadius.valueAsNumber)
-  );
+  addBodyButton.addEventListener("click", () => {
+    void bindings.onAddBody(
+      bodyShape.value as BodyShapeChoice,
+      bodySize.valueAsNumber,
+      particleRadius.valueAsNumber,
+      svgFile.files?.[0]
+    );
+  });
   bindings.setBodyStats(0, settings.particleCount);
   refresh();
   return bindings;
@@ -1009,32 +1385,141 @@ function renderVectorLayer(
   context.lineCap = "round";
 
   for (const body of bodies) {
-    if (body.perimeterParticleCount < 3 || body.startIndex + body.perimeterParticleCount > particleCount) {
+    if (body.svgRender && body.startIndex + body.particleCount <= particleCount) {
+      renderWarpedSvgBody(context, view, body);
       continue;
     }
 
-    context.beginPath();
-    for (let i = 0; i < body.perimeterParticleCount; i += 1) {
-      const offset = (body.startIndex + i) * PARTICLE_STRIDE_BYTES;
-      const x = view.getFloat32(offset, true);
-      const y = view.getFloat32(offset + 4, true);
-      if (i === 0) {
-        context.moveTo(x, y);
-      } else {
-        context.lineTo(x, y);
-      }
+    renderPolygonBody(context, view, body, particleCount);
+  }
+}
+
+function renderPolygonBody(
+  context: CanvasRenderingContext2D,
+  view: DataView,
+  body: BodyRenderInfo,
+  particleCount: number
+) {
+  if (body.perimeterParticleCount < 3 || body.startIndex + body.perimeterParticleCount > particleCount) {
+    return;
+  }
+
+  context.beginPath();
+  for (let i = 0; i < body.perimeterParticleCount; i += 1) {
+    const offset = (body.startIndex + i) * PARTICLE_STRIDE_BYTES;
+    const x = view.getFloat32(offset, true);
+    const y = view.getFloat32(offset + 4, true);
+    if (i === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  }
+
+  context.closePath();
+  const bodyColor = BODY_FILL_COLORS[body.materialId % BODY_FILL_COLORS.length];
+  context.fillStyle = bodyColor;
+  context.globalAlpha = 0.82;
+  context.fill();
+  context.globalAlpha = 1;
+  context.strokeStyle = bodyColor;
+  context.lineWidth = Math.max(1, body.particleRadius * 2);
+  context.stroke();
+}
+
+function renderWarpedSvgBody(context: CanvasRenderingContext2D, view: DataView, body: BodyRenderInfo) {
+  const svg = body.svgRender;
+  if (!svg || svg.triangles.length === 0) {
+    return;
+  }
+
+  const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  context.save();
+  context.imageSmoothingEnabled = true;
+  context.globalAlpha = 0.96;
+
+  for (const triangle of svg.triangles) {
+    const sourceA = svg.points[triangle[0]];
+    const sourceB = svg.points[triangle[1]];
+    const sourceC = svg.points[triangle[2]];
+    const destA = readBodyParticlePosition(view, body, triangle[0]);
+    const destB = readBodyParticlePosition(view, body, triangle[1]);
+    const destC = readBodyParticlePosition(view, body, triangle[2]);
+
+    if (Math.abs(triangleArea(destA, destB, destC)) < 0.001) {
+      continue;
     }
 
+    const transform = sourceToDestinationTransform(sourceA, sourceB, sourceC, destA, destB, destC);
+    if (!transform) {
+      continue;
+    }
+
+    context.save();
+    context.beginPath();
+    context.moveTo(destA.x, destA.y);
+    context.lineTo(destB.x, destB.y);
+    context.lineTo(destC.x, destC.y);
     context.closePath();
-    const bodyColor = BODY_FILL_COLORS[body.materialId % BODY_FILL_COLORS.length];
-    context.fillStyle = bodyColor;
-    context.globalAlpha = 0.82;
-    context.fill();
-    context.globalAlpha = 1;
-    context.strokeStyle = bodyColor;
-    context.lineWidth = Math.max(1, body.particleRadius * 2);
-    context.stroke();
+    context.clip();
+    context.setTransform(
+      transform.a * dpr,
+      transform.b * dpr,
+      transform.c * dpr,
+      transform.d * dpr,
+      transform.e * dpr,
+      transform.f * dpr
+    );
+    context.drawImage(svg.image, 0, 0);
+    context.restore();
   }
+
+  context.restore();
+}
+
+function readBodyParticlePosition(view: DataView, body: BodyRenderInfo, localIndex: number) {
+  const offset = (body.startIndex + localIndex) * PARTICLE_STRIDE_BYTES;
+  return {
+    x: view.getFloat32(offset, true),
+    y: view.getFloat32(offset + 4, true)
+  };
+}
+
+function sourceToDestinationTransform(
+  sourceA: SvgRenderPoint,
+  sourceB: SvgRenderPoint,
+  sourceC: SvgRenderPoint,
+  destA: { x: number; y: number },
+  destB: { x: number; y: number },
+  destC: { x: number; y: number }
+) {
+  const x0 = sourceA.sourceX;
+  const y0 = sourceA.sourceY;
+  const x1 = sourceB.sourceX;
+  const y1 = sourceB.sourceY;
+  const x2 = sourceC.sourceX;
+  const y2 = sourceC.sourceY;
+  const denominator = x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1);
+  if (Math.abs(denominator) < 0.000001) {
+    return undefined;
+  }
+
+  return {
+    a: (destA.x * (y1 - y2) + destB.x * (y2 - y0) + destC.x * (y0 - y1)) / denominator,
+    b: (destA.y * (y1 - y2) + destB.y * (y2 - y0) + destC.y * (y0 - y1)) / denominator,
+    c: (destA.x * (x2 - x1) + destB.x * (x0 - x2) + destC.x * (x1 - x0)) / denominator,
+    d: (destA.y * (x2 - x1) + destB.y * (x0 - x2) + destC.y * (x1 - x0)) / denominator,
+    e:
+      (destA.x * (x1 * y2 - x2 * y1) +
+        destB.x * (x2 * y0 - x0 * y2) +
+        destC.x * (x0 * y1 - x1 * y0)) /
+      denominator,
+    f:
+      (destA.y * (x1 * y2 - x2 * y1) +
+        destB.y * (x2 * y0 - x0 * y2) +
+        destC.y * (x0 * y1 - x1 * y0)) /
+      denominator
+  };
 }
 
 function updateDragBand(element: HTMLElement, anchor: { x: number; y: number } | undefined, pointer: PointerState) {
@@ -1178,6 +1663,14 @@ function getInput(id: string): HTMLInputElement {
   const input = document.getElementById(id);
   if (!(input instanceof HTMLInputElement)) {
     throw new Error(`Missing input #${id}`);
+  }
+  return input;
+}
+
+function getFileInput(id: string): HTMLInputElement {
+  const input = getInput(id);
+  if (input.type !== "file") {
+    throw new Error(`Expected file input #${id}`);
   }
   return input;
 }

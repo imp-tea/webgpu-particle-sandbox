@@ -34,6 +34,8 @@ struct VertexOut {
 @group(0) @binding(1) var<uniform> params: RenderParams;
 @group(0) @binding(2) var<storage, read> materials: array<MaterialParams>;
 
+const PACKED_COLOR_FLAG: u32 = 0x80000000u;
+
 @vertex
 fn vertexMain(
   @builtin(vertex_index) vertexIndex: u32,
@@ -71,10 +73,23 @@ fn fragmentMain(in: VertexOut) -> @location(0) vec4<f32> {
     discard;
   }
 
-  let base = materials[in.materialId % 4u].color.rgb;
+  let base = particleColor(in.materialId);
   let edge = smoothstep(1.0, 0.72, distanceSq);
   let speedGlow = clamp(in.speed / 700.0, 0.0, 1.0);
   let color = base * (0.68 + edge * 0.36) + vec3<f32>(0.22, 0.34, 0.42) * speedGlow;
   let alpha = smoothstep(1.0, 0.82, distanceSq);
   return vec4<f32>(color, alpha);
+}
+
+fn particleColor(materialId: u32) -> vec3<f32> {
+  if ((materialId & PACKED_COLOR_FLAG) != 0u) {
+    let rgb = materialId & 0x00ffffffu;
+    return vec3<f32>(
+      f32((rgb >> 16u) & 0xffu),
+      f32((rgb >> 8u) & 0xffu),
+      f32(rgb & 0xffu)
+    ) / 255.0;
+  }
+
+  return materials[materialId % 4u].color.rgb;
 }

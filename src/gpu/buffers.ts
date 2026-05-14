@@ -25,9 +25,16 @@ import type { PointerState } from "../input";
 
 export type SoftBodyShape = "square" | "rectangle" | "circle" | "triangle";
 export type BodySpawnPoint = { x: number; y: number };
+export type SampledBodyPoint = {
+  x: number;
+  y: number;
+  boundary: boolean;
+  color?: number;
+};
 
 const BODY_ID_MASK = 0x0000ffff;
 const INVALID_BOND_INDEX = 0xffffffff;
+const PACKED_COLOR_FLAG = 0x80000000;
 
 export type ParticleBuffers = {
   buffers: [GPUBuffer, GPUBuffer];
@@ -56,6 +63,20 @@ export type ParticleBuffers = {
     restShapeBuffer: GPUBuffer,
     shape: SoftBodyShape,
     size: number,
+    particleRadius: number,
+    properties: BodyProperties,
+    worldWidth: number,
+    worldHeight: number,
+    spawnPoint?: BodySpawnPoint
+  ) => SoftBodyAddResult;
+  addSampledBody: (
+    device: GPUDevice,
+    bodyBuffer: GPUBuffer,
+    bondBuffer: GPUBuffer,
+    restShapeBuffer: GPUBuffer,
+    points: SampledBodyPoint[],
+    size: number,
+    spacing: number,
     particleRadius: number,
     properties: BodyProperties,
     worldWidth: number,
@@ -182,6 +203,70 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
         worldHeight,
         spawnPoint
       });
+
+      if (this.particleCount + body.particleCount > this.maxParticles) {
+        return { added: false, reason: `Particle limit reached (${this.maxParticles.toLocaleString()}).` };
+      }
+
+      const particleOffset = this.particleCount * PARTICLE_STRIDE_BYTES;
+      device.queue.writeBuffer(buffers[0], particleOffset, body.particleData);
+      device.queue.writeBuffer(buffers[1], particleOffset, body.particleData);
+      device.queue.writeBuffer(bodyBuffer, this.bodyCount * BODY_STRIDE_BYTES, body.bodyData);
+      device.queue.writeBuffer(
+        bondBuffer,
+        this.particleCount * BOND_SLOT_COUNT * BOND_STRIDE_BYTES,
+        body.bondData
+      );
+      device.queue.writeBuffer(restShapeBuffer, this.particleCount * REST_SHAPE_STRIDE_BYTES, body.restShapeData);
+
+      this.particleCount += body.particleCount;
+      this.bodyCount += 1;
+      return {
+        added: true,
+        particleCount: this.particleCount,
+        bodyCount: this.bodyCount,
+        addedParticles: body.particleCount,
+        bodyId: body.bodyId,
+        startIndex: body.startIndex,
+        perimeterParticleCount: body.perimeterParticleCount,
+        particleRadius: body.particleRadius,
+        materialId: body.materialId
+      };
+    },
+    addSampledBody(
+      device,
+      bodyBuffer,
+      bondBuffer,
+      restShapeBuffer,
+      points,
+      size,
+      spacing,
+      particleRadius,
+      properties,
+      worldWidth,
+      worldHeight,
+      spawnPoint
+    ) {
+      if (this.bodyCount >= MAX_BODIES) {
+        return { added: false, reason: `Body limit reached (${MAX_BODIES}).` };
+      }
+
+      const body = createSampledBodyData({
+        points,
+        size,
+        spacing,
+        particleRadius,
+        bodyId: this.bodyCount,
+        startIndex: this.particleCount,
+        properties,
+        worldWidth,
+        worldHeight,
+        spawnPoint
+      });
+
+      if (!body) {
+        return { added: false, reason: "SVG did not produce any filled particles." };
+      }
 
       if (this.particleCount + body.particleCount > this.maxParticles) {
         return { added: false, reason: `Particle limit reached (${this.maxParticles.toLocaleString()}).` };
@@ -438,21 +523,58 @@ type SoftBodyDataOptions = {
   spawnPoint?: BodySpawnPoint;
 };
 
+type SampledBodyDataOptions = Omit<SoftBodyDataOptions, "shape"> & {
+  points: SampledBodyPoint[];
+  spacing: number;
+};
+
 function createSoftBodyData(options: SoftBodyDataOptions) {
-  const size = Math.max(40, Math.min(260, options.size));
+  const size = Math.max(40, Math.min(480, options.size));
   const targetAcross = Math.max(6, Math.min(34, Math.round(size / 8)));
   const spacing = size / Math.max(1, targetAcross - 1);
   const rng = mulberry32(0x5eed1234 + options.bodyId * 0x9e3779b9);
   const points = createShapePoints(options.shape, size, spacing, rng);
+  return createBodyData({
+    ...options,
+    points,
+    size,
+    spacing,
+    rng
+  });
+}
+
+function createSampledBodyData(options: SampledBodyDataOptions) {
+  const points = options.points.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (points.length === 0) {
+    return undefined;
+  }
+
+  const rng = mulberry32(0x5eed1234 + options.bodyId * 0x9e3779b9);
+  return createBodyData({
+    ...options,
+    points,
+    size: Math.max(40, Math.min(480, options.size)),
+    spacing: Math.max(1, options.spacing),
+    rng
+  });
+}
+
+type BodyDataOptions = Omit<SampledBodyDataOptions, "points"> & {
+  points: SampledBodyPoint[];
+  rng: () => number;
+};
+
+function createBodyData(options: BodyDataOptions) {
+  const points = options.points;
   const particleCount = points.length;
   const perimeterParticleCount = points.findIndex((point) => !point.boundary);
   const particleData = new ArrayBuffer(particleCount * PARTICLE_STRIDE_BYTES);
-  const bondData = createBondData(points, options.startIndex, spacing);
+  const bondData = createBondData(points, options.startIndex, options.spacing);
   const restShapeData = createRestShapeData(points);
   const bodyData = new ArrayBuffer(BODY_STRIDE_BYTES);
   const particleView = new DataView(particleData);
   const bodyView = new DataView(bodyData);
-  const center = options.spawnPoint ?? pickBodyCenter(options.bodyId, size, options.worldWidth, options.worldHeight);
+  const center = options.spawnPoint ?? pickBodyCenter(options.bodyId, options.size, options.worldWidth, options.worldHeight);
   const radius = Math.max(1, Math.min(8, options.particleRadius));
   const materialId = options.bodyId % MATERIAL_COUNT;
   const bodyId = options.bodyId & BODY_ID_MASK;
@@ -460,14 +582,15 @@ function createSoftBodyData(options: SoftBodyDataOptions) {
   for (let localIndex = 0; localIndex < points.length; localIndex += 1) {
     const point = points[localIndex];
     const offset = localIndex * PARTICLE_STRIDE_BYTES;
-    const angle = rng() * Math.PI * 2;
-    const speed = rng() * 8;
+    const angle = options.rng() * Math.PI * 2;
+    const speed = options.rng() * 8;
+    const pointMaterialId = point.color === undefined ? materialId : packParticleColor(point.color);
 
     particleView.setFloat32(offset, center.x + point.x, true);
     particleView.setFloat32(offset + 4, center.y + point.y, true);
     particleView.setFloat32(offset + 8, Math.cos(angle) * speed, true);
     particleView.setFloat32(offset + 12, Math.sin(angle) * speed, true);
-    particleView.setUint32(offset + 16, materialId, true);
+    particleView.setUint32(offset + 16, pointMaterialId, true);
     particleView.setUint32(offset + 20, bodyId, true);
     particleView.setFloat32(offset + 24, radius, true);
     particleView.setFloat32(offset + 28, radius * radius, true);
@@ -495,6 +618,10 @@ function createSoftBodyData(options: SoftBodyDataOptions) {
   };
 }
 
+function packParticleColor(color: number) {
+  return (PACKED_COLOR_FLAG | (color & 0x00ffffff)) >>> 0;
+}
+
 function createBodyPropertiesData(properties: BodyProperties) {
   const data = new ArrayBuffer(12);
   const view = new DataView(data);
@@ -512,11 +639,7 @@ function createBodyMotorData(targetAngularVelocity: number, motorStrength: numbe
   return data;
 }
 
-type BodyPoint = {
-  x: number;
-  y: number;
-  boundary: boolean;
-};
+type BodyPoint = SampledBodyPoint;
 
 type BondNeighbor = {
   index: number;

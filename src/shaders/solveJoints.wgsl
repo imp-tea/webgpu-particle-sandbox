@@ -82,6 +82,7 @@ struct BodyTransform {
 const BODY_ID_MASK: u32 = 0x0000ffffu;
 const MAX_JOINTS: u32 = 64u;
 const SHAPE_MATCH_SAMPLE_COUNT: u32 = 24u;
+const FLOOR_TANGENT_SLEEP_SPEED: f32 = 5.0;
 
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
@@ -144,9 +145,14 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
       correction = correction / correctionLength * maxCorrection;
     }
 
-    particle.position = clamp(particle.position + correction, vec2<f32>(particle.radius), params.worldSize - vec2<f32>(particle.radius));
+    let previousPosition = particle.position;
+    particle.position = clamp(previousPosition + correction, vec2<f32>(particle.radius), params.worldSize - vec2<f32>(particle.radius));
     if (params.deltaTime > 0.000001) {
-      particle.velocity += correction / params.deltaTime;
+      let appliedCorrection = particle.position - previousPosition;
+      particle.velocity += appliedCorrection / params.deltaTime;
+      if (particle.position.y >= params.worldSize.y - particle.radius && abs(particle.velocity.x) < FLOOR_TANGENT_SLEEP_SPEED) {
+        particle.velocity.x = 0.0;
+      }
       particle.velocity = clampVelocity(particle.velocity);
     }
   }
