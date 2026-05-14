@@ -24,6 +24,7 @@ import {
 import type { PointerState } from "../input";
 
 export type SoftBodyShape = "square" | "rectangle" | "circle" | "triangle";
+export type BodyKind = "soft" | "static";
 export type BodySpawnPoint = { x: number; y: number };
 export type SampledBodyPoint = {
   x: number;
@@ -33,6 +34,9 @@ export type SampledBodyPoint = {
 };
 
 const BODY_ID_MASK = 0x0000ffff;
+const PARTICLE_KIND_SHIFT = 16;
+const PARTICLE_KIND_SOFT = 0;
+const PARTICLE_KIND_STATIC = 1;
 const INVALID_BOND_INDEX = 0xffffffff;
 const PACKED_COLOR_FLAG = 0x80000000;
 
@@ -87,6 +91,7 @@ export type ParticleBuffers = {
 };
 
 export type BodyProperties = {
+  kind: BodyKind;
   softBodyStrength: number;
   viscosity: number;
   friction: number;
@@ -578,6 +583,9 @@ function createBodyData(options: BodyDataOptions) {
   const radius = Math.max(1, Math.min(8, options.particleRadius));
   const materialId = options.bodyId % MATERIAL_COUNT;
   const bodyId = options.bodyId & BODY_ID_MASK;
+  const particleFlags = createParticleFlags(bodyId, options.properties.kind);
+  const particleMass = options.properties.kind === "static" ? 0 : radius * radius;
+  const bodyFlags = bodyKindFlag(options.properties.kind);
 
   for (let localIndex = 0; localIndex < points.length; localIndex += 1) {
     const point = points[localIndex];
@@ -591,9 +599,9 @@ function createBodyData(options: BodyDataOptions) {
     particleView.setFloat32(offset + 8, Math.cos(angle) * speed, true);
     particleView.setFloat32(offset + 12, Math.sin(angle) * speed, true);
     particleView.setUint32(offset + 16, pointMaterialId, true);
-    particleView.setUint32(offset + 20, bodyId, true);
+    particleView.setUint32(offset + 20, particleFlags, true);
     particleView.setFloat32(offset + 24, radius, true);
-    particleView.setFloat32(offset + 28, radius * radius, true);
+    particleView.setFloat32(offset + 28, particleMass, true);
   }
 
   bodyView.setUint32(0, options.startIndex, true);
@@ -603,6 +611,7 @@ function createBodyData(options: BodyDataOptions) {
   bodyView.setFloat32(16, options.properties.softBodyStrength, true);
   bodyView.setFloat32(20, options.properties.viscosity, true);
   bodyView.setFloat32(24, options.properties.friction, true);
+  bodyView.setUint32(28, bodyFlags, true);
 
   return {
     particleData,
@@ -620,6 +629,14 @@ function createBodyData(options: BodyDataOptions) {
 
 function packParticleColor(color: number) {
   return (PACKED_COLOR_FLAG | (color & 0x00ffffff)) >>> 0;
+}
+
+function createParticleFlags(bodyId: number, kind: BodyKind) {
+  return ((bodyKindFlag(kind) << PARTICLE_KIND_SHIFT) | (bodyId & BODY_ID_MASK)) >>> 0;
+}
+
+function bodyKindFlag(kind: BodyKind) {
+  return kind === "static" ? PARTICLE_KIND_STATIC : PARTICLE_KIND_SOFT;
 }
 
 function createBodyPropertiesData(properties: BodyProperties) {

@@ -149,6 +149,22 @@ label span {
   gap: 8px;
 }
 
+.checkbox-row {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.checkbox-row span {
+  justify-content: flex-start;
+}
+
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #65d8ff;
+}
+
 output {
   color: #86deff;
   font-variant-numeric: tabular-nums;

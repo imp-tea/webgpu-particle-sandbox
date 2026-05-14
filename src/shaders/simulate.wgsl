@@ -43,7 +43,7 @@ struct BodyParams {
   softBodyStrength: f32,
   viscosity: f32,
   friction: f32,
-  padding1: f32,
+  flags: u32,
 };
 
 struct Bond {
@@ -67,6 +67,11 @@ struct RestShape {
 @group(0) @binding(5) var<storage, read> restShapes: array<RestShape>;
 
 const BODY_ID_MASK: u32 = 0x0000ffffu;
+const PARTICLE_KIND_SHIFT: u32 = 16u;
+const PARTICLE_KIND_MASK: u32 = 0x0000000fu;
+const PARTICLE_KIND_STATIC: u32 = 1u;
+const BODY_KIND_MASK: u32 = 0x0000000fu;
+const BODY_KIND_STATIC: u32 = 1u;
 const BOND_SLOT_COUNT: u32 = 8u;
 const INVALID_BOND_INDEX: u32 = 0xffffffffu;
 const SHAPE_MATCH_SAMPLE_COUNT: u32 = 24u;
@@ -82,6 +87,12 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
   var particle = particlesIn[index];
   if (!particleActive(particle)) {
+    particlesOut[index] = particle;
+    return;
+  }
+
+  if (particleStatic(particle)) {
+    particle.velocity = vec2<f32>(0.0);
     particlesOut[index] = particle;
     return;
   }
@@ -173,7 +184,7 @@ fn relaxSoftBodyPosition(index: u32, predictedPosition: vec2<f32>) -> vec2<f32> 
     for (var slot = 0u; slot < BOND_SLOT_COUNT; slot += 1u) {
       let orderedSlot = select(slot, BOND_SLOT_COUNT - 1u - slot, reverseSlots);
       let bond = bonds[index * BOND_SLOT_COUNT + orderedSlot];
-      position = relaxBond(position, bodyId, bond, iterationStiffness);
+      position = relaxBond(position, bodyId, bond, iterationStiffness, particleInvMass(particlesIn[index]));
     }
   }
 
@@ -201,7 +212,7 @@ fn dragAcceleration(index: u32, particle: Particle) -> vec2<f32> {
   let falloff = max(0.18, 1.0 / (1.0 + normalizedDistance * normalizedDistance));
   let selectedBoost = select(1.0, 1.2, index == params.selectedParticleIndex);
 
-  return dragDelta * params.mouseForce * falloff * selectedBoost / max(particle.mass, 0.001);
+  return dragDelta * params.mouseForce * falloff * selectedBoost * particleInvMass(particle);
 }
 
 fn motorAcceleration(index: u32, particle: Particle) -> vec2<f32> {
@@ -229,7 +240,7 @@ fn motorAcceleration(index: u32, particle: Particle) -> vec2<f32> {
   let motorDelta = targetTangentialVelocity - currentTangentialVelocity;
   let rimFactor = smoothstep(particle.radius * 2.0, particle.radius * 8.0, radialLength);
 
-  return motorDelta * body.motorStrength * rimFactor / max(particle.mass, 0.001);
+  return motorDelta * body.motorStrength * rimFactor * particleInvMass(particle);
 }
 
 fn bodyCenter(bodyId: u32) -> vec2<f32> {
@@ -408,7 +419,7 @@ fn sampleNeighborVelocity(bodyId: u32, bond: Bond, velocity: vec2<f32>) -> Veloc
   return VelocitySample((other.velocity - velocity) * bond.weight, bond.weight);
 }
 
-fn relaxBond(position: vec2<f32>, bodyId: u32, bond: Bond, iterationStiffness: f32) -> vec2<f32> {
+fn relaxBond(position: vec2<f32>, bodyId: u32, bond: Bond, iterationStiffness: f32, currentInvMass: f32) -> vec2<f32> {
   if (
     bond.neighborIndex == INVALID_BOND_INDEX ||
     bond.neighborIndex >= params.particleCount ||
@@ -420,6 +431,11 @@ fn relaxBond(position: vec2<f32>, bodyId: u32, bond: Bond, iterationStiffness: f
 
   let other = particlesIn[bond.neighborIndex];
   if (!particleActive(other) || particleBodyId(other) != bodyId) {
+    return position;
+  }
+  let otherInvMass = particleInvMass(other);
+  let invMassSum = currentInvMass + otherInvMass;
+  if (invMassSum <= 0.0) {
     return position;
   }
 
@@ -434,7 +450,7 @@ fn relaxBond(position: vec2<f32>, bodyId: u32, bond: Bond, iterationStiffness: f
   let direction = delta / distance;
   let safeRestDistance = max(bond.restLength, 0.01);
   let stretch = clamp(distance - safeRestDistance, -safeRestDistance * 0.5, safeRestDistance * 0.5);
-  let correction = stretch * 0.5 * iterationStiffness * bond.weight;
+  let correction = stretch * (currentInvMass / invMassSum) * iterationStiffness * bond.weight;
 
   return position - direction * correction;
 }
@@ -457,4 +473,17 @@ fn particleActive(particle: Particle) -> bool {
 
 fn particleBodyId(particle: Particle) -> u32 {
   return particle.flags & BODY_ID_MASK;
+}
+
+fn particleKind(particle: Particle) -> u32 {
+  return (particle.flags >> PARTICLE_KIND_SHIFT) & PARTICLE_KIND_MASK;
+}
+
+fn particleStatic(particle: Particle) -> bool {
+  let body = bodies[particleBodyId(particle)];
+  return particle.mass <= 0.0 || particleKind(particle) == PARTICLE_KIND_STATIC || (body.flags & BODY_KIND_MASK) == BODY_KIND_STATIC;
+}
+
+fn particleInvMass(particle: Particle) -> f32 {
+  return select(1.0 / max(particle.mass, 0.001), 0.0, particleStatic(particle));
 }

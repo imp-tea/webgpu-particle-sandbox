@@ -43,7 +43,7 @@ struct BodyParams {
   softBodyStrength: f32,
   viscosity: f32,
   friction: f32,
-  padding1: f32,
+  flags: u32,
 };
 
 struct RestShape {
@@ -80,6 +80,11 @@ struct BodyTransform {
 @group(0) @binding(5) var<storage, read> joints: array<Joint>;
 
 const BODY_ID_MASK: u32 = 0x0000ffffu;
+const PARTICLE_KIND_SHIFT: u32 = 16u;
+const PARTICLE_KIND_MASK: u32 = 0x0000000fu;
+const PARTICLE_KIND_STATIC: u32 = 1u;
+const BODY_KIND_MASK: u32 = 0x0000000fu;
+const BODY_KIND_STATIC: u32 = 1u;
 const MAX_JOINTS: u32 = 64u;
 const SHAPE_MATCH_SAMPLE_COUNT: u32 = 24u;
 const FLOOR_TANGENT_SLEEP_SPEED: f32 = 5.0;
@@ -93,6 +98,12 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
   var particle = particlesIn[index];
   if (!particleActive(particle) || params.jointCount == 0u) {
+    particlesOut[index] = particle;
+    return;
+  }
+
+  if (particleStatic(particle)) {
+    particle.velocity = vec2<f32>(0.0);
     particlesOut[index] = particle;
     return;
   }
@@ -114,6 +125,13 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
       continue;
     }
 
+    let invMassA = bodyInvMass(joint.bodyA);
+    let invMassB = bodyInvMass(joint.bodyB);
+    let invMassSum = invMassA + invMassB;
+    if (invMassSum <= 0.0) {
+      continue;
+    }
+
     let anchorA = worldAnchor(transformA, joint.localAnchorA);
     let anchorB = worldAnchor(transformB, joint.localAnchorB);
     let delta = anchorB - anchorA;
@@ -128,7 +146,8 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     let targetStiffness = clamp(joint.stiffness, 0.0, 1.0);
     let iterations = max(1.0, f32(max(params.jointIterations, 1u)));
     let iterationStiffness = 1.0 - pow(1.0 - targetStiffness, 1.0 / iterations);
-    let anchorCorrection = normal * error * 0.5 * iterationStiffness;
+    let bodyCorrectionScale = select(invMassB, invMassA, bodyId == joint.bodyA) / invMassSum;
+    let anchorCorrection = normal * error * bodyCorrectionScale * iterationStiffness;
     let localAnchor = select(joint.localAnchorB, joint.localAnchorA, bodyId == joint.bodyA);
     let signedCorrection = select(-anchorCorrection, anchorCorrection, bodyId == joint.bodyA);
     let influenceRadius = max(joint.influenceRadius, particle.radius * 4.0);
@@ -249,4 +268,20 @@ fn particleActive(particle: Particle) -> bool {
 
 fn particleBodyId(particle: Particle) -> u32 {
   return particle.flags & BODY_ID_MASK;
+}
+
+fn particleKind(particle: Particle) -> u32 {
+  return (particle.flags >> PARTICLE_KIND_SHIFT) & PARTICLE_KIND_MASK;
+}
+
+fn particleStatic(particle: Particle) -> bool {
+  return particle.mass <= 0.0 || particleKind(particle) == PARTICLE_KIND_STATIC || bodyStatic(particleBodyId(particle));
+}
+
+fn bodyStatic(bodyId: u32) -> bool {
+  return (bodies[bodyId].flags & BODY_KIND_MASK) == BODY_KIND_STATIC;
+}
+
+fn bodyInvMass(bodyId: u32) -> f32 {
+  return select(1.0, 0.0, bodyStatic(bodyId));
 }

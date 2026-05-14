@@ -42,7 +42,7 @@ struct BodyParams {
   softBodyStrength: f32,
   viscosity: f32,
   friction: f32,
-  padding1: f32,
+  flags: u32,
 };
 
 struct Joint {
@@ -68,6 +68,11 @@ struct Joint {
 @group(0) @binding(7) var<storage, read> joints: array<Joint>;
 
 const BODY_ID_MASK: u32 = 0x0000ffffu;
+const PARTICLE_KIND_SHIFT: u32 = 16u;
+const PARTICLE_KIND_MASK: u32 = 0x0000000fu;
+const PARTICLE_KIND_STATIC: u32 = 1u;
+const BODY_KIND_MASK: u32 = 0x0000000fu;
+const BODY_KIND_STATIC: u32 = 1u;
 const MAX_JOINTS: u32 = 64u;
 const CONTACT_SLOP: f32 = 0.015;
 const CONTACT_STIFFNESS: f32 = 0.72;
@@ -83,6 +88,12 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
   var particle = particlesIn[index];
   if (!particleActive(particle)) {
+    particlesOut[index] = particle;
+    return;
+  }
+
+  if (particleStatic(particle)) {
+    particle.velocity = vec2<f32>(0.0);
     particlesOut[index] = particle;
     return;
   }
@@ -184,8 +195,8 @@ fn contactCorrection(particle: Particle, other: Particle) -> vec2<f32> {
   }
 
   let normal = delta / distance;
-  let invMass = 1.0 / max(particle.mass, 0.001);
-  let otherInvMass = 1.0 / max(other.mass, 0.001);
+  let invMass = particleInvMass(particle);
+  let otherInvMass = particleInvMass(other);
   let invMassSum = invMass + otherInvMass;
   if (invMassSum <= 0.0) {
     return vec2<f32>(0.0);
@@ -232,6 +243,19 @@ fn particleActive(particle: Particle) -> bool {
 
 fn particleBodyId(particle: Particle) -> u32 {
   return particle.flags & BODY_ID_MASK;
+}
+
+fn particleKind(particle: Particle) -> u32 {
+  return (particle.flags >> PARTICLE_KIND_SHIFT) & PARTICLE_KIND_MASK;
+}
+
+fn particleStatic(particle: Particle) -> bool {
+  let body = bodies[particleBodyId(particle)];
+  return particle.mass <= 0.0 || particleKind(particle) == PARTICLE_KIND_STATIC || (body.flags & BODY_KIND_MASK) == BODY_KIND_STATIC;
+}
+
+fn particleInvMass(particle: Particle) -> f32 {
+  return select(1.0 / max(particle.mass, 0.001), 0.0, particleStatic(particle));
 }
 
 fn particleCell(position: vec2<f32>) -> vec2<u32> {

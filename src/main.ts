@@ -583,6 +583,7 @@ function addVehicleScene(
   const chassisAnchorY = axleY - chassisCenterY;
   const vehicleParticleRadius = 8;
   const defaultBodyProperties = {
+    kind: "soft" as const,
     softBodyStrength: settings.softBodyStrength,
     viscosity: settings.viscosity,
     friction: settings.friction
@@ -1037,6 +1038,7 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
   const viscosityOutput = getOutput("viscosity-output");
   const friction = getInput("friction");
   const frictionOutput = getOutput("friction-output");
+  const staticBody = getInput("static-body");
   const motorStrengthControl = getElement("motor-strength-control");
   const motorStrength = getInput("motor-strength");
   const motorStrengthOutput = getOutput("motor-strength-output");
@@ -1051,6 +1053,7 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
   let selectedBodyId: number | undefined;
   let selectedBodyProperties: BodyProperties | undefined;
   let spawnBodyProperties: BodyProperties = {
+    kind: "soft",
     softBodyStrength: settings.softBodyStrength,
     viscosity: settings.viscosity,
     friction: settings.friction
@@ -1077,12 +1080,16 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
         softBodyStrength.value = String(spawnBodyProperties.softBodyStrength);
         viscosity.value = String(spawnBodyProperties.viscosity);
         friction.value = String(spawnBodyProperties.friction);
+        staticBody.checked = spawnBodyProperties.kind === "static";
+        staticBody.disabled = false;
         motorStrengthControl.hidden = true;
       } else {
         propertyMode.textContent = `Editing body ${selectedBodyId + 1}`;
         softBodyStrength.value = String(selectedBodyProperties.softBodyStrength);
         viscosity.value = String(selectedBodyProperties.viscosity);
         friction.value = String(selectedBodyProperties.friction);
+        staticBody.checked = selectedBodyProperties.kind === "static";
+        staticBody.disabled = true;
         const selectedMotorStrength = vehicle.getMotorStrength(selectedBodyId);
         motorStrengthControl.hidden = selectedMotorStrength === undefined;
         if (selectedMotorStrength !== undefined) {
@@ -1189,6 +1196,19 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
     updateCurrentBodyProperties({
       ...getCurrentBodyProperties(),
       friction: friction.valueAsNumber
+    });
+    refresh();
+  });
+
+  staticBody.addEventListener("change", () => {
+    if (selectedBodyId !== undefined) {
+      refresh();
+      return;
+    }
+
+    updateCurrentBodyProperties({
+      ...getCurrentBodyProperties(),
+      kind: staticBody.checked ? "static" : "soft"
     });
     refresh();
   });
