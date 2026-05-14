@@ -10,6 +10,7 @@ import {
   createRestShapeBuffer,
   createUniformBuffer,
   getGridDimensions,
+  type BodyKind,
   type BodyProperties,
   type JointDefinition,
   type SampledBodyPoint,
@@ -28,8 +29,24 @@ const vectorCanvasElement = document.querySelector<HTMLCanvasElement>("#vector-c
 const statusElement = document.querySelector<HTMLElement>("#gpu-status");
 const debugElement = document.querySelector<HTMLElement>("#debug-stats");
 const dragBandElement = document.querySelector<HTMLElement>("#drag-band");
+const placementMarkerElement = document.querySelector<HTMLElement>("#placement-marker");
+const placementBandElement = document.querySelector<HTMLElement>("#placement-band");
+const placementHintElement = document.querySelector<HTMLElement>("#placement-hint");
+const jointMarkerElement = document.querySelector<HTMLElement>("#joint-marker");
+const jointBandElement = document.querySelector<HTMLElement>("#joint-band");
 
-if (!canvasElement || !vectorCanvasElement || !statusElement || !debugElement || !dragBandElement) {
+if (
+  !canvasElement ||
+  !vectorCanvasElement ||
+  !statusElement ||
+  !debugElement ||
+  !dragBandElement ||
+  !placementMarkerElement ||
+  !placementBandElement ||
+  !placementHintElement ||
+  !jointMarkerElement ||
+  !jointBandElement
+) {
   throw new Error("Missing required DOM nodes.");
 }
 
@@ -38,6 +55,14 @@ const vectorCanvas: HTMLCanvasElement = vectorCanvasElement;
 const statusLabel: HTMLElement = statusElement;
 const debugLabel: HTMLElement = debugElement;
 const dragBand: HTMLElement = dragBandElement;
+const placementMarker: HTMLElement = placementMarkerElement;
+const placementBand: HTMLElement = placementBandElement;
+const placementHint: HTMLElement = placementHintElement;
+const jointMarker: HTMLElement = jointMarkerElement;
+const jointBand: HTMLElement = jointBandElement;
+const placementHintIdle = placementHint.textContent ?? "";
+const placementHintPendingRope = "Click again to set the rope end. Esc to cancel.";
+const placementHintPendingJoint = "Shift+Click a second body to complete the joint. Esc to cancel.";
 const defaultSvgUrl = new URL("../test.svg", import.meta.url).href;
 
 void start();
@@ -127,11 +152,24 @@ async function start() {
       particleSnapshot = undefined;
       particleSnapshotCount = 0;
       ui.setSelectedBody(undefined);
+      cancelPendingPlacement();
       settings.particleCount = particles.particleCount;
-      ui.setBodyStats(particles.bodyCount, particles.particleCount);
+      refreshLiveStats();
     };
 
-    ui.onAddBody = async (shape, bodySize, particleRadius, svgFile) => {
+    const refreshLiveStats = () => {
+      const liveParticles = bodyRenderInfos.reduce((sum, info) => sum + info.particleCount, 0);
+      ui.setBodyStats(bodyRenderInfos.length, liveParticles);
+    };
+
+    const spawnBody = async (
+      shape: BodyShapeChoice,
+      bodySize: number,
+      particleRadius: number,
+      svgFile: File | undefined,
+      spawnPoint?: { x: number; y: number },
+      endPoint?: { x: number; y: number }
+    ) => {
       const size = gpu.getWorldSize();
       const properties = ui.getSpawnBodyProperties();
       if (shape === "svg") {
@@ -149,27 +187,71 @@ async function start() {
             particleRadius,
             properties,
             size.width,
-            size.height
+            size.height,
+            spawnPoint
           );
           if (result.added) {
             bodyProperties.push({ ...properties });
             bodyRenderInfos.push({
+              kind: properties.kind,
               bodyId: result.bodyId,
               startIndex: result.startIndex,
               particleCount: result.addedParticles,
               perimeterParticleCount: result.perimeterParticleCount,
               particleRadius: result.particleRadius,
               materialId: result.materialId,
+              restPositions: result.restPositions,
               svgRender: source.render
             });
             settings.particleCount = result.particleCount;
-            ui.setBodyStats(result.bodyCount, result.particleCount);
+            refreshLiveStats();
             statusLabel.textContent = `Added SVG body (${result.addedParticles.toLocaleString()} particles)`;
           } else {
             statusLabel.textContent = result.reason;
           }
         } catch (error) {
           statusLabel.textContent = error instanceof Error ? error.message : String(error);
+        }
+        return;
+      }
+
+      if (shape === "rope") {
+        const ropeOptions = ui.getRopeOptions();
+        const result = particles.addRope(
+          gpu.device,
+          bodies,
+          bonds,
+          restShapes,
+          bodySize,
+          particleRadius,
+          properties,
+          size.width,
+          size.height,
+          ropeOptions.pinnedStart,
+          ropeOptions.pinnedEnd,
+          spawnPoint,
+          endPoint,
+          ropeOptions.lengthMultiplier,
+          ropeOptions.density
+        );
+        if (result.added) {
+          const ropeProperties = { ...properties, kind: "rope" as const };
+          bodyProperties.push(ropeProperties);
+          bodyRenderInfos.push({
+            kind: "rope",
+            bodyId: result.bodyId,
+            startIndex: result.startIndex,
+            particleCount: result.addedParticles,
+            perimeterParticleCount: result.perimeterParticleCount,
+            particleRadius: result.particleRadius,
+            materialId: result.materialId,
+            restPositions: result.restPositions
+          });
+          settings.particleCount = result.particleCount;
+          refreshLiveStats();
+          statusLabel.textContent = `Added rope (${result.addedParticles.toLocaleString()} particles)`;
+        } else {
+          statusLabel.textContent = result.reason;
         }
         return;
       }
@@ -184,25 +266,192 @@ async function start() {
         particleRadius,
         properties,
         size.width,
-        size.height
+        size.height,
+        spawnPoint
       );
       if (result.added) {
         bodyProperties.push({ ...properties });
         bodyRenderInfos.push({
+          kind: properties.kind,
           bodyId: result.bodyId,
           startIndex: result.startIndex,
           particleCount: result.addedParticles,
           perimeterParticleCount: result.perimeterParticleCount,
           particleRadius: result.particleRadius,
-          materialId: result.materialId
+          materialId: result.materialId,
+          restPositions: result.restPositions
         });
         settings.particleCount = result.particleCount;
-        ui.setBodyStats(result.bodyCount, result.particleCount);
+        refreshLiveStats();
         statusLabel.textContent = `Added ${shape} body (${result.addedParticles.toLocaleString()} particles)`;
       } else {
         statusLabel.textContent = result.reason;
       }
     };
+
+    ui.onAddBody = spawnBody;
+
+    let pendingRopeStart: { x: number; y: number } | undefined;
+    let pendingJointAnchor:
+      | { bodyId: number; particleIndex: number; world: { x: number; y: number }; localAnchor: { x: number; y: number } }
+      | undefined;
+    const updatePlacementHint = () => {
+      if (pendingRopeStart) {
+        placementHint.textContent = placementHintPendingRope;
+        placementHint.classList.add("active");
+      } else if (pendingJointAnchor) {
+        placementHint.textContent = placementHintPendingJoint;
+        placementHint.classList.add("active");
+      } else {
+        placementHint.textContent = placementHintIdle;
+        placementHint.classList.remove("active");
+      }
+    };
+    const cancelPendingPlacement = () => {
+      if (!pendingRopeStart && !pendingJointAnchor) {
+        return;
+      }
+      pendingRopeStart = undefined;
+      pendingJointAnchor = undefined;
+      updatePlacementHint();
+    };
+    ui.onShapeChange = () => {
+      if (pendingRopeStart) {
+        pendingRopeStart = undefined;
+        updatePlacementHint();
+      }
+    };
+    pointer.onPlace = (position) => {
+      const args = ui.getSpawnArgs();
+      if (args.shape === "rope") {
+        if (!pendingRopeStart) {
+          pendingRopeStart = { x: position.x, y: position.y };
+          updatePlacementHint();
+          statusLabel.textContent = "Rope start placed. Click to set the end.";
+          return;
+        }
+        const start = pendingRopeStart;
+        pendingRopeStart = undefined;
+        updatePlacementHint();
+        void spawnBody(args.shape, args.bodySize, args.particleRadius, args.svgFile, start, position);
+        return;
+      }
+      cancelPendingPlacement();
+      void spawnBody(args.shape, args.bodySize, args.particleRadius, args.svgFile, position);
+    };
+
+    pointer.onAddJoint = (position) => {
+      const pick = pickNearestParticleFromSnapshot(particleSnapshot, particleSnapshotCount, position.x, position.y);
+      if (!pick) {
+        statusLabel.textContent = "No body at cursor.";
+        return;
+      }
+      const info = bodyRenderInfos.find((entry) => entry.bodyId === pick.bodyId);
+      if (!info) {
+        return;
+      }
+      const localIndex = pick.particleIndex - info.startIndex;
+      if (localIndex < 0 || localIndex >= info.particleCount) {
+        return;
+      }
+      const localAnchor = {
+        x: info.restPositions[localIndex * 2],
+        y: info.restPositions[localIndex * 2 + 1]
+      };
+
+      if (!pendingJointAnchor) {
+        pendingJointAnchor = {
+          bodyId: pick.bodyId,
+          particleIndex: pick.particleIndex,
+          world: { x: pick.x, y: pick.y },
+          localAnchor
+        };
+        updatePlacementHint();
+        statusLabel.textContent = `Joint anchor set on body ${pick.bodyId + 1}.`;
+        return;
+      }
+
+      if (pendingJointAnchor.bodyId === pick.bodyId) {
+        statusLabel.textContent = "Joint endpoints must be on different bodies.";
+        return;
+      }
+
+      if (jointDefinitions.length >= 64) {
+        statusLabel.textContent = "Joint limit reached.";
+        pendingJointAnchor = undefined;
+        updatePlacementHint();
+        return;
+      }
+
+      const anchorWorldDistance = Math.hypot(
+        pendingJointAnchor.world.x - pick.x,
+        pendingJointAnchor.world.y - pick.y
+      );
+      const radiusGuess = Math.max(info.particleRadius * 12, 32);
+      const newJoint = {
+        bodyA: pendingJointAnchor.bodyId,
+        bodyB: pick.bodyId,
+        localAnchorA: pendingJointAnchor.localAnchor,
+        localAnchorB: localAnchor,
+        restLength: 0,
+        stiffness: 0.78,
+        influenceRadius: Math.max(radiusGuess, anchorWorldDistance * 0.5)
+      };
+      jointDefinitions = [...jointDefinitions, newJoint];
+      jointCount = writeJointBuffer(gpu.device, joints, jointDefinitions);
+      const completedBodyId = pendingJointAnchor.bodyId;
+      pendingJointAnchor = undefined;
+      updatePlacementHint();
+      statusLabel.textContent = `Joined body ${completedBodyId + 1} to body ${pick.bodyId + 1}.`;
+    };
+
+    pointer.onDelete = (position) => {
+      const pick = pickNearestParticleFromSnapshot(particleSnapshot, particleSnapshotCount, position.x, position.y);
+      if (!pick) {
+        return;
+      }
+      const renderIndex = bodyRenderInfos.findIndex((info) => info.bodyId === pick.bodyId);
+      if (renderIndex < 0) {
+        return;
+      }
+      const info = bodyRenderInfos[renderIndex];
+      particles.deleteBody(
+        gpu.device,
+        bodies,
+        bonds,
+        restShapes,
+        pick.bodyId,
+        info.startIndex,
+        info.particleCount
+      );
+      bodyRenderInfos.splice(renderIndex, 1);
+      delete bodyProperties[pick.bodyId];
+      const filteredJoints = jointDefinitions.filter(
+        (joint) => joint.bodyA !== pick.bodyId && joint.bodyB !== pick.bodyId
+      );
+      if (filteredJoints.length !== jointDefinitions.length) {
+        jointDefinitions = filteredJoints;
+        jointCount = writeJointBuffer(gpu.device, joints, jointDefinitions);
+      }
+      vehicle.forgetBody(pick.bodyId);
+      if (pointer.state.selectedBodyId === pick.bodyId) {
+        pointer.state.selectedBodyId = 0xffffffff;
+        pointer.state.selectedParticleIndex = 0xffffffff;
+        dragAnchor = undefined;
+        ui.setSelectedBody(undefined);
+      }
+      if (pendingJointAnchor?.bodyId === pick.bodyId) {
+        pendingJointAnchor = undefined;
+        updatePlacementHint();
+      }
+      refreshLiveStats();
+      statusLabel.textContent = `Deleted body ${pick.bodyId + 1}`;
+    };
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        cancelPendingPlacement();
+      }
+    });
 
     ui.onBodyPropertiesChange = (bodyId, properties) => {
       if (bodyId === undefined) {
@@ -297,6 +546,12 @@ async function start() {
         getParticlePositionFromSnapshot(particleSnapshot, particleSnapshotCount, pointer.state.selectedParticleIndex) ??
         dragAnchor;
       updateDragBand(dragBand, liveDragAnchor, pointer.state);
+      updatePlacementPreview(placementMarker, placementBand, pendingRopeStart, pointer.state);
+      const livePendingJointAnchor = pendingJointAnchor
+        ? getParticlePositionFromSnapshot(particleSnapshot, particleSnapshotCount, pendingJointAnchor.particleIndex) ??
+          pendingJointAnchor.world
+        : undefined;
+      updatePlacementPreview(jointMarker, jointBand, livePendingJointAnchor, pointer.state);
       const renderingVectors = ui.getRenderMode() === "vectors";
       const snapshotInterval =
         pointer.state.active && pointer.state.selectedParticleIndex !== 0xffffffff ? 16 : renderingVectors ? 16 : 80;
@@ -445,11 +700,31 @@ async function start() {
 
 type ControlBindings = {
   onReset: () => void;
-  onAddBody: (shape: BodyShapeChoice, size: number, particleRadius: number, svgFile?: File) => void | Promise<void>;
+  onAddBody: (
+    shape: BodyShapeChoice,
+    size: number,
+    particleRadius: number,
+    svgFile: File | undefined,
+    spawnPoint?: { x: number; y: number },
+    endPoint?: { x: number; y: number }
+  ) => void | Promise<void>;
   onBodyPropertiesChange: (bodyId: number | undefined, properties: BodyProperties) => void;
   onPauseToggle: () => void;
+  onShapeChange: (shape: BodyShapeChoice) => void;
   getRenderMode: () => RenderMode;
   getSpawnBodyProperties: () => BodyProperties;
+  getRopeOptions: () => {
+    pinnedStart: boolean;
+    pinnedEnd: boolean;
+    lengthMultiplier: number;
+    density: number;
+  };
+  getSpawnArgs: () => {
+    shape: BodyShapeChoice;
+    bodySize: number;
+    particleRadius: number;
+    svgFile: File | undefined;
+  };
   setSelectedBody: (bodyId: number | undefined, properties?: BodyProperties) => void;
   setPaused: (paused: boolean) => void;
   setBodyStats: (bodyCount: number, particleCount: number) => void;
@@ -457,15 +732,17 @@ type ControlBindings = {
 };
 
 type RenderMode = "particles" | "vectors";
-type BodyShapeChoice = SoftBodyShape | "svg";
+type BodyShapeChoice = SoftBodyShape | "svg" | "rope";
 
 type BodyRenderInfo = {
+  kind: BodyKind;
   bodyId: number;
   startIndex: number;
   particleCount: number;
   perimeterParticleCount: number;
   particleRadius: number;
   materialId: number;
+  restPositions: Float32Array;
   svgRender?: SvgRenderInfo;
 };
 
@@ -496,6 +773,7 @@ type DebugStats = {
 type VehicleController = {
   setWheels: (leftWheelBodyId: number, rightWheelBodyId: number) => void;
   clear: () => void;
+  forgetBody: (bodyId: number) => void;
   getMotorStrength: (bodyId: number | undefined) => number | undefined;
   setMotorStrength: (bodyId: number | undefined, motorStrength: number) => void;
   updateMotors: (device: GPUDevice, particles: ParticleBuffers, bodyBuffer: GPUBuffer) => void;
@@ -533,6 +811,15 @@ function createVehicleController(): VehicleController {
       rightWheelBodyId = undefined;
       keys.clear();
       motorStrengths.clear();
+    },
+    forgetBody(bodyId) {
+      motorStrengths.delete(bodyId);
+      if (leftWheelBodyId === bodyId) {
+        leftWheelBodyId = undefined;
+      }
+      if (rightWheelBodyId === bodyId) {
+        rightWheelBodyId = undefined;
+      }
     },
     getMotorStrength(bodyId) {
       return bodyId === undefined ? undefined : motorStrengths.get(bodyId);
@@ -705,12 +992,14 @@ function addSceneBody(
 
   bodyProperties[result.bodyId] = { ...properties };
   bodyRenderInfos.push({
+    kind: properties.kind,
     bodyId: result.bodyId,
     startIndex: result.startIndex,
     particleCount: result.addedParticles,
     perimeterParticleCount: result.perimeterParticleCount,
     particleRadius: result.particleRadius,
-    materialId: result.materialId
+    materialId: result.materialId,
+    restPositions: result.restPositions
   });
 
   return result;
@@ -1038,7 +1327,17 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
   const viscosityOutput = getOutput("viscosity-output");
   const friction = getInput("friction");
   const frictionOutput = getOutput("friction-output");
+  const staticBodyControl = getElement("static-body-control");
   const staticBody = getInput("static-body");
+  const ropePinsControl = getElement("rope-pins-control");
+  const ropePinStart = getInput("rope-pin-start");
+  const ropePinEnd = getInput("rope-pin-end");
+  const ropeLengthControl = getElement("rope-length-control");
+  const ropeLength = getInput("rope-length");
+  const ropeLengthOutput = getOutput("rope-length-output");
+  const ropeDensityControl = getElement("rope-density-control");
+  const ropeDensity = getInput("rope-density");
+  const ropeDensityOutput = getOutput("rope-density-output");
   const motorStrengthControl = getElement("motor-strength-control");
   const motorStrength = getInput("motor-strength");
   const motorStrengthOutput = getOutput("motor-strength-output");
@@ -1065,11 +1364,28 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
     onAddBody: () => undefined,
     onBodyPropertiesChange: () => undefined,
     onPauseToggle: () => undefined,
+    onShapeChange: () => undefined,
     getRenderMode() {
       return renderMode.value as RenderMode;
     },
     getSpawnBodyProperties() {
       return { ...spawnBodyProperties };
+    },
+    getRopeOptions() {
+      return {
+        pinnedStart: ropePinStart.checked,
+        pinnedEnd: ropePinEnd.checked,
+        lengthMultiplier: ropeLength.valueAsNumber,
+        density: ropeDensity.valueAsNumber
+      };
+    },
+    getSpawnArgs() {
+      return {
+        shape: bodyShape.value as BodyShapeChoice,
+        bodySize: bodySize.valueAsNumber,
+        particleRadius: particleRadius.valueAsNumber,
+        svgFile: svgFile.files?.[0]
+      };
     },
     setSelectedBody(bodyId, properties) {
       selectedBodyId = properties ? bodyId : undefined;
@@ -1123,9 +1439,16 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
   mouseForce.value = String(settings.mouseForce);
 
   const refresh = () => {
+    const spawningRope = bodyShape.value === "rope";
     svgFileControl.hidden = bodyShape.value !== "svg";
+    ropePinsControl.hidden = !spawningRope;
+    ropeLengthControl.hidden = !spawningRope;
+    ropeDensityControl.hidden = !spawningRope;
+    staticBodyControl.hidden = spawningRope;
     bodySizeOutput.value = bodySize.valueAsNumber.toFixed(0);
     particleRadiusOutput.value = particleRadius.valueAsNumber.toFixed(1);
+    ropeLengthOutput.value = `${ropeLength.valueAsNumber.toFixed(2)}x`;
+    ropeDensityOutput.value = `${ropeDensity.valueAsNumber.toFixed(2)}x`;
     gravityOutput.value = settings.gravityY.toFixed(0);
     dampingOutput.value = settings.damping.toFixed(2);
     substepsOutput.value = clampSubsteps(settings.substeps).toFixed(0);
@@ -1144,10 +1467,19 @@ function bindControls(settings: SimulationSettings, vehicle: VehicleController):
   });
 
   bodyShape.addEventListener("change", () => {
+    bindings.onShapeChange(bodyShape.value as BodyShapeChoice);
     refresh();
   });
 
   particleRadius.addEventListener("input", () => {
+    refresh();
+  });
+
+  ropeLength.addEventListener("input", () => {
+    refresh();
+  });
+
+  ropeDensity.addEventListener("input", () => {
     refresh();
   });
 
@@ -1410,8 +1742,43 @@ function renderVectorLayer(
       continue;
     }
 
+    if (body.kind === "rope") {
+      renderRopeBody(context, view, body, particleCount);
+      continue;
+    }
+
     renderPolygonBody(context, view, body, particleCount);
   }
+}
+
+function renderRopeBody(
+  context: CanvasRenderingContext2D,
+  view: DataView,
+  body: BodyRenderInfo,
+  particleCount: number
+) {
+  if (body.particleCount < 2 || body.startIndex + body.particleCount > particleCount) {
+    return;
+  }
+
+  context.beginPath();
+  for (let i = 0; i < body.particleCount; i += 1) {
+    const offset = (body.startIndex + i) * PARTICLE_STRIDE_BYTES;
+    const x = view.getFloat32(offset, true);
+    const y = view.getFloat32(offset + 4, true);
+    if (i === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  }
+
+  const bodyColor = BODY_FILL_COLORS[body.materialId % BODY_FILL_COLORS.length];
+  context.strokeStyle = bodyColor;
+  context.lineWidth = Math.max(2, body.particleRadius * 2.2);
+  context.globalAlpha = 0.9;
+  context.stroke();
+  context.globalAlpha = 1;
 }
 
 function renderPolygonBody(
@@ -1555,6 +1922,30 @@ function updateDragBand(element: HTMLElement, anchor: { x: number; y: number } |
   element.style.opacity = "1";
   element.style.width = `${length}px`;
   element.style.transform = `translate(${anchor.x}px, ${anchor.y - 1}px) rotate(${angle}rad)`;
+}
+
+function updatePlacementPreview(
+  marker: HTMLElement,
+  band: HTMLElement,
+  start: { x: number; y: number } | undefined,
+  pointer: PointerState
+) {
+  if (!start) {
+    marker.style.opacity = "0";
+    band.style.opacity = "0";
+    return;
+  }
+
+  marker.style.opacity = "1";
+  marker.style.transform = `translate(${start.x}px, ${start.y}px)`;
+
+  const dx = pointer.x - start.x;
+  const dy = pointer.y - start.y;
+  const length = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  band.style.opacity = "1";
+  band.style.width = `${length}px`;
+  band.style.transform = `translate(${start.x}px, ${start.y - 1}px) rotate(${angle}rad)`;
 }
 
 async function pickNearestParticle(

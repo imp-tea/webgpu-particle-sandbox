@@ -24,7 +24,7 @@ import {
 import type { PointerState } from "../input";
 
 export type SoftBodyShape = "square" | "rectangle" | "circle" | "triangle";
-export type BodyKind = "soft" | "static";
+export type BodyKind = "soft" | "rope" | "static";
 export type BodySpawnPoint = { x: number; y: number };
 export type SampledBodyPoint = {
   x: number;
@@ -37,6 +37,7 @@ const BODY_ID_MASK = 0x0000ffff;
 const PARTICLE_KIND_SHIFT = 16;
 const PARTICLE_KIND_SOFT = 0;
 const PARTICLE_KIND_STATIC = 1;
+const PARTICLE_KIND_ROPE = 2;
 const INVALID_BOND_INDEX = 0xffffffff;
 const PACKED_COLOR_FLAG = 0x80000000;
 
@@ -87,6 +88,32 @@ export type ParticleBuffers = {
     worldHeight: number,
     spawnPoint?: BodySpawnPoint
   ) => SoftBodyAddResult;
+  addRope: (
+    device: GPUDevice,
+    bodyBuffer: GPUBuffer,
+    bondBuffer: GPUBuffer,
+    restShapeBuffer: GPUBuffer,
+    size: number,
+    particleRadius: number,
+    properties: BodyProperties,
+    worldWidth: number,
+    worldHeight: number,
+    pinnedStart: boolean,
+    pinnedEnd: boolean,
+    spawnPoint?: BodySpawnPoint,
+    endPoint?: BodySpawnPoint,
+    lengthMultiplier?: number,
+    density?: number
+  ) => SoftBodyAddResult;
+  deleteBody: (
+    device: GPUDevice,
+    bodyBuffer: GPUBuffer,
+    bondBuffer: GPUBuffer,
+    restShapeBuffer: GPUBuffer,
+    bodyId: number,
+    startIndex: number,
+    particleCount: number
+  ) => boolean;
   swap: () => void;
 };
 
@@ -118,6 +145,7 @@ export type SoftBodyAddResult =
       perimeterParticleCount: number;
       particleRadius: number;
       materialId: number;
+      restPositions: Float32Array;
     }
   | {
       added: false;
@@ -235,7 +263,8 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
         startIndex: body.startIndex,
         perimeterParticleCount: body.perimeterParticleCount,
         particleRadius: body.particleRadius,
-        materialId: body.materialId
+        materialId: body.materialId,
+        restPositions: body.restPositions
       };
     },
     addSampledBody(
@@ -299,8 +328,103 @@ export function createParticleBuffers(device: GPUDevice, maxParticles = DEFAULT_
         startIndex: body.startIndex,
         perimeterParticleCount: body.perimeterParticleCount,
         particleRadius: body.particleRadius,
-        materialId: body.materialId
+        materialId: body.materialId,
+        restPositions: body.restPositions
       };
+    },
+    addRope(
+      device,
+      bodyBuffer,
+      bondBuffer,
+      restShapeBuffer,
+      size,
+      particleRadius,
+      properties,
+      worldWidth,
+      worldHeight,
+      pinnedStart,
+      pinnedEnd,
+      spawnPoint,
+      endPoint,
+      lengthMultiplier,
+      density
+    ) {
+      if (this.bodyCount >= MAX_BODIES) {
+        return { added: false, reason: `Body limit reached (${MAX_BODIES}).` };
+      }
+
+      const body = createRopeBodyData({
+        size,
+        particleRadius,
+        bodyId: this.bodyCount,
+        startIndex: this.particleCount,
+        properties: {
+          ...properties,
+          kind: "rope"
+        },
+        worldWidth,
+        worldHeight,
+        pinnedStart,
+        pinnedEnd,
+        spawnPoint,
+        endPoint,
+        lengthMultiplier,
+        density
+      });
+
+      if (this.particleCount + body.particleCount > this.maxParticles) {
+        return { added: false, reason: `Particle limit reached (${this.maxParticles.toLocaleString()}).` };
+      }
+
+      const particleOffset = this.particleCount * PARTICLE_STRIDE_BYTES;
+      device.queue.writeBuffer(buffers[0], particleOffset, body.particleData);
+      device.queue.writeBuffer(buffers[1], particleOffset, body.particleData);
+      device.queue.writeBuffer(bodyBuffer, this.bodyCount * BODY_STRIDE_BYTES, body.bodyData);
+      device.queue.writeBuffer(
+        bondBuffer,
+        this.particleCount * BOND_SLOT_COUNT * BOND_STRIDE_BYTES,
+        body.bondData
+      );
+      device.queue.writeBuffer(restShapeBuffer, this.particleCount * REST_SHAPE_STRIDE_BYTES, body.restShapeData);
+
+      this.particleCount += body.particleCount;
+      this.bodyCount += 1;
+      return {
+        added: true,
+        particleCount: this.particleCount,
+        bodyCount: this.bodyCount,
+        addedParticles: body.particleCount,
+        bodyId: body.bodyId,
+        startIndex: body.startIndex,
+        perimeterParticleCount: body.perimeterParticleCount,
+        particleRadius: body.particleRadius,
+        materialId: body.materialId,
+        restPositions: body.restPositions
+      };
+    },
+    deleteBody(device, bodyBuffer, bondBuffer, restShapeBuffer, bodyId, startIndex, particleCount) {
+      if (bodyId < 0 || bodyId >= this.bodyCount || particleCount <= 0) {
+        return false;
+      }
+      if (startIndex < 0 || startIndex + particleCount > this.maxParticles) {
+        return false;
+      }
+
+      const deadParticles = new ArrayBuffer(particleCount * PARTICLE_STRIDE_BYTES);
+      device.queue.writeBuffer(buffers[0], startIndex * PARTICLE_STRIDE_BYTES, deadParticles);
+      device.queue.writeBuffer(buffers[1], startIndex * PARTICLE_STRIDE_BYTES, deadParticles);
+      device.queue.writeBuffer(
+        bondBuffer,
+        startIndex * BOND_SLOT_COUNT * BOND_STRIDE_BYTES,
+        createEmptyBondData(particleCount)
+      );
+      device.queue.writeBuffer(
+        restShapeBuffer,
+        startIndex * REST_SHAPE_STRIDE_BYTES,
+        new ArrayBuffer(particleCount * REST_SHAPE_STRIDE_BYTES)
+      );
+      device.queue.writeBuffer(bodyBuffer, bodyId * BODY_STRIDE_BYTES, new ArrayBuffer(BODY_STRIDE_BYTES));
+      return true;
     },
     swap() {
       this.activeIndex = 1 - this.activeIndex;
@@ -533,6 +657,14 @@ type SampledBodyDataOptions = Omit<SoftBodyDataOptions, "shape"> & {
   spacing: number;
 };
 
+type RopeBodyDataOptions = Omit<SoftBodyDataOptions, "shape"> & {
+  pinnedStart: boolean;
+  pinnedEnd: boolean;
+  endPoint?: BodySpawnPoint;
+  lengthMultiplier?: number;
+  density?: number;
+};
+
 function createSoftBodyData(options: SoftBodyDataOptions) {
   const size = Math.max(40, Math.min(480, options.size));
   const targetAcross = Math.max(6, Math.min(34, Math.round(size / 8)));
@@ -562,6 +694,113 @@ function createSampledBodyData(options: SampledBodyDataOptions) {
     spacing: Math.max(1, options.spacing),
     rng
   });
+}
+
+function createRopeBodyData(options: RopeBodyDataOptions) {
+  const radius = Math.max(1, Math.min(8, options.particleRadius));
+  const density = Math.max(0.4, Math.min(2.5, options.density ?? 1));
+  const spacing = Math.max(radius * 2.2, 7) / density;
+  const hasEndPoints = options.spawnPoint !== undefined && options.endPoint !== undefined;
+  const lengthMultiplier = Math.max(0.25, Math.min(2.5, options.lengthMultiplier ?? 1));
+  let length: number;
+  let originX: number;
+  let originY: number;
+  let axisX: number;
+  let axisY: number;
+  let normalX: number;
+  let normalY: number;
+  let particleSpan: number;
+  let initialSag: number;
+
+  if (hasEndPoints) {
+    const start = options.spawnPoint!;
+    const end = options.endPoint!;
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const measured = Math.max(Math.hypot(dx, dy), spacing * 3);
+    length = Math.max(spacing * 3, Math.min(1500, measured * lengthMultiplier));
+    particleSpan = measured;
+    const inv = 1 / measured;
+    axisX = dx === 0 && dy === 0 ? 1 : dx * inv;
+    axisY = dx === 0 && dy === 0 ? 0 : dy * inv;
+    normalX = -axisY;
+    normalY = axisX;
+    originX = (start.x + end.x) * 0.5;
+    originY = (start.y + end.y) * 0.5;
+    initialSag = 0;
+  } else {
+    length = Math.max(48, Math.min(480, options.size));
+    particleSpan = length;
+    const center =
+      options.spawnPoint ?? pickBodyCenter(options.bodyId, length, options.worldWidth, options.worldHeight);
+    originX = center.x;
+    originY = center.y;
+    axisX = 1;
+    axisY = 0;
+    normalX = 0;
+    normalY = 1;
+    initialSag = Math.min(36, length * 0.12);
+  }
+
+  const segmentCount = Math.max(3, Math.min(96, Math.round(length / spacing)));
+  const particleCount = segmentCount + 1;
+  const bodyId = options.bodyId & BODY_ID_MASK;
+  const materialId = options.bodyId % MATERIAL_COUNT;
+  const restSag = hasEndPoints ? 0 : Math.min(36, length * 0.12);
+  const particleData = new ArrayBuffer(particleCount * PARTICLE_STRIDE_BYTES);
+  const bondData = createRopeBondData(particleCount, options.startIndex, length / segmentCount);
+  const restShapeData = createRopeRestShapeData(particleCount, length, restSag);
+  const restPositions = new Float32Array(particleCount * 2);
+  const bodyData = new ArrayBuffer(BODY_STRIDE_BYTES);
+  const particleView = new DataView(particleData);
+  const bodyView = new DataView(bodyData);
+
+  for (let localIndex = 0; localIndex < particleCount; localIndex += 1) {
+    const offset = localIndex * PARTICLE_STRIDE_BYTES;
+    const t = localIndex / segmentCount;
+    const localX = (t - 0.5) * particleSpan;
+    const localY = Math.sin(t * Math.PI) * initialSag;
+    const worldX = originX + axisX * localX + normalX * localY;
+    const worldY = originY + axisY * localX + normalY * localY;
+    const pinned = (localIndex === 0 && options.pinnedStart) || (localIndex === segmentCount && options.pinnedEnd);
+    const particleKind = pinned ? "static" : "rope";
+    const restLocalX = (t - 0.5) * length;
+    const restLocalY = Math.sin(t * Math.PI) * restSag;
+    restPositions[localIndex * 2] = restLocalX;
+    restPositions[localIndex * 2 + 1] = restLocalY;
+
+    particleView.setFloat32(offset, worldX, true);
+    particleView.setFloat32(offset + 4, worldY, true);
+    particleView.setFloat32(offset + 8, 0, true);
+    particleView.setFloat32(offset + 12, 0, true);
+    particleView.setUint32(offset + 16, materialId, true);
+    particleView.setUint32(offset + 20, createParticleFlags(bodyId, particleKind), true);
+    particleView.setFloat32(offset + 24, radius, true);
+    particleView.setFloat32(offset + 28, pinned ? 0 : radius * radius, true);
+  }
+
+  bodyView.setUint32(0, options.startIndex, true);
+  bodyView.setUint32(4, particleCount, true);
+  bodyView.setFloat32(8, 0, true);
+  bodyView.setFloat32(12, 0, true);
+  bodyView.setFloat32(16, options.properties.softBodyStrength, true);
+  bodyView.setFloat32(20, options.properties.viscosity, true);
+  bodyView.setFloat32(24, options.properties.friction, true);
+  bodyView.setUint32(28, bodyKindFlag("rope"), true);
+
+  return {
+    particleData,
+    bodyData,
+    bondData,
+    restShapeData,
+    restPositions,
+    particleCount,
+    perimeterParticleCount: particleCount,
+    particleRadius: radius,
+    materialId,
+    bodyId: options.bodyId,
+    startIndex: options.startIndex
+  };
 }
 
 type BodyDataOptions = Omit<SampledBodyDataOptions, "points"> & {
@@ -613,11 +852,18 @@ function createBodyData(options: BodyDataOptions) {
   bodyView.setFloat32(24, options.properties.friction, true);
   bodyView.setUint32(28, bodyFlags, true);
 
+  const restPositions = new Float32Array(particleCount * 2);
+  for (let i = 0; i < particleCount; i += 1) {
+    restPositions[i * 2] = points[i].x;
+    restPositions[i * 2 + 1] = points[i].y;
+  }
+
   return {
     particleData,
     bodyData,
     bondData,
     restShapeData,
+    restPositions,
     particleCount,
     perimeterParticleCount: perimeterParticleCount === -1 ? particleCount : perimeterParticleCount,
     particleRadius: radius,
@@ -636,7 +882,15 @@ function createParticleFlags(bodyId: number, kind: BodyKind) {
 }
 
 function bodyKindFlag(kind: BodyKind) {
-  return kind === "static" ? PARTICLE_KIND_STATIC : PARTICLE_KIND_SOFT;
+  if (kind === "static") {
+    return PARTICLE_KIND_STATIC;
+  }
+
+  if (kind === "rope") {
+    return PARTICLE_KIND_ROPE;
+  }
+
+  return PARTICLE_KIND_SOFT;
 }
 
 function createBodyPropertiesData(properties: BodyProperties) {
@@ -674,6 +928,22 @@ function createRestShapeData(points: BodyPoint[]) {
     view.setFloat32(offset, point.x, true);
     view.setFloat32(offset + 4, point.y, true);
     view.setFloat32(offset + 8, point.boundary ? 1 : 0.18, true);
+  }
+
+  return data;
+}
+
+function createRopeRestShapeData(particleCount: number, length: number, ySag: number) {
+  const data = new ArrayBuffer(particleCount * REST_SHAPE_STRIDE_BYTES);
+  const view = new DataView(data);
+  const segmentCount = Math.max(1, particleCount - 1);
+
+  for (let i = 0; i < particleCount; i += 1) {
+    const offset = i * REST_SHAPE_STRIDE_BYTES;
+    const t = i / segmentCount;
+    view.setFloat32(offset, (t - 0.5) * length, true);
+    view.setFloat32(offset + 4, Math.sin(t * Math.PI) * ySag, true);
+    view.setFloat32(offset + 8, 0, true);
   }
 
   return data;
@@ -1050,6 +1320,49 @@ function createBondData(points: BodyPoint[], startIndex: number, spacing: number
   }
 
   return data;
+}
+
+function createRopeBondData(particleCount: number, startIndex: number, restLength: number) {
+  const data = createEmptyBondData(particleCount);
+  const view = new DataView(data);
+
+  for (let localIndex = 0; localIndex < particleCount; localIndex += 1) {
+    let slot = 0;
+    if (localIndex > 0) {
+      writeBond(view, localIndex, slot, startIndex + localIndex - 1, restLength, 1.25);
+      slot += 1;
+    }
+
+    if (localIndex + 1 < particleCount) {
+      writeBond(view, localIndex, slot, startIndex + localIndex + 1, restLength, 1.25);
+      slot += 1;
+    }
+
+    if (localIndex > 1) {
+      writeBond(view, localIndex, slot, startIndex + localIndex - 2, restLength * 2, 0.36);
+      slot += 1;
+    }
+
+    if (localIndex + 2 < particleCount) {
+      writeBond(view, localIndex, slot, startIndex + localIndex + 2, restLength * 2, 0.36);
+    }
+  }
+
+  return data;
+}
+
+function writeBond(
+  view: DataView,
+  particleIndex: number,
+  slot: number,
+  neighborIndex: number,
+  restLength: number,
+  weight: number
+) {
+  const offset = (particleIndex * BOND_SLOT_COUNT + slot) * BOND_STRIDE_BYTES;
+  view.setUint32(offset, neighborIndex, true);
+  view.setFloat32(offset + 4, restLength, true);
+  view.setFloat32(offset + 8, weight, true);
 }
 
 function createEmptyBondData(particleCount: number) {

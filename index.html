@@ -10,6 +10,10 @@
       <canvas id="sim-canvas"></canvas>
       <canvas id="vector-canvas" aria-hidden="true"></canvas>
       <div id="drag-band" aria-hidden="true"></div>
+      <div id="placement-band" aria-hidden="true"></div>
+      <div id="placement-marker" aria-hidden="true"></div>
+      <div id="joint-band" aria-hidden="true"></div>
+      <div id="joint-marker" aria-hidden="true"></div>
       <section id="controls" aria-label="Simulation controls">
         <div class="title-row">
           <div>
@@ -23,103 +27,150 @@
           </div>
         </div>
 
-        <label>
-          <span>Body <output id="body-stats-output">0 / 0</output></span>
-          <select id="body-shape">
-            <option value="square">Square</option>
-            <option value="rectangle">Rectangle</option>
-            <option value="circle">Circle</option>
-            <option value="triangle">Triangle</option>
-            <option value="svg">SVG</option>
-          </select>
-        </label>
+        <p id="placement-hint">Ctrl+Click to place. Ctrl+Right-Click to delete. Shift+Click two bodies to join.</p>
 
-        <label id="svg-file-control" hidden>
-          <span>SVG file</span>
-          <input id="svg-file" type="file" accept=".svg,image/svg+xml" />
-        </label>
+        <details class="control-section" open>
+          <summary>Body</summary>
+          <div class="section-body">
+            <label>
+              <span>Shape <output id="body-stats-output">0 / 0</output></span>
+              <select id="body-shape">
+                <option value="square">Square</option>
+                <option value="rectangle">Rectangle</option>
+                <option value="circle">Circle</option>
+                <option value="triangle">Triangle</option>
+                <option value="rope">Rope</option>
+                <option value="svg">SVG</option>
+              </select>
+            </label>
 
-        <p id="property-mode">Editing spawn properties</p>
+            <label id="svg-file-control" hidden>
+              <span>SVG file</span>
+              <input id="svg-file" type="file" accept=".svg,image/svg+xml" />
+            </label>
 
-        <label>
-          <span>Render</span>
-          <select id="render-mode">
-            <option value="particles">Particles</option>
-            <option value="vectors">Vectors</option>
-          </select>
-        </label>
+            <label>
+              <span>Size <output id="body-size-output">120</output></span>
+              <input id="body-size" type="range" min="48" max="480" step="8" value="120" />
+            </label>
 
-        <label>
-          <span>Size <output id="body-size-output">120</output></span>
-          <input id="body-size" type="range" min="48" max="480" step="8" value="120" />
-        </label>
+            <label>
+              <span>Radius <output id="particle-radius-output">8.0</output></span>
+              <input id="particle-radius" type="range" min="1" max="8" step="0.1" value="8" />
+            </label>
 
-        <label>
-          <span>Radius <output id="particle-radius-output">8.0</output></span>
-          <input id="particle-radius" type="range" min="1" max="8" step="0.1" value="8" />
-        </label>
+            <button id="add-body-button" type="button">Add body</button>
 
-        <button id="add-body-button" type="button">Add body</button>
+            <label id="rope-length-control" hidden>
+              <span>Rope length <output id="rope-length-output">1.00x</output></span>
+              <input id="rope-length" type="range" min="0.5" max="2" step="0.05" value="1" />
+            </label>
 
-        <label>
-          <span>Gravity <output id="gravity-output">280</output></span>
-          <input id="gravity" type="range" min="-600" max="1000" step="10" value="280" />
-        </label>
+            <label id="rope-density-control" hidden>
+              <span>Rope density <output id="rope-density-output">1.00x</output></span>
+              <input id="rope-density" type="range" min="0.5" max="2" step="0.05" value="1" />
+            </label>
 
-        <label>
-          <span>Damping <output id="damping-output">0.25</output></span>
-          <input id="damping" type="range" min="0" max="2" step="0.01" value="0.25" />
-        </label>
+            <div id="rope-pins-control" class="control-block" hidden>
+              <span>Rope pins</span>
+              <span class="inline-checks">
+                <label class="checkbox-row">
+                  <span>Start</span>
+                  <input id="rope-pin-start" type="checkbox" checked />
+                </label>
+                <label class="checkbox-row">
+                  <span>End</span>
+                  <input id="rope-pin-end" type="checkbox" />
+                </label>
+              </span>
+            </div>
 
-        <label>
-          <span>Substeps <output id="substeps-output">4</output></span>
-          <input id="substeps" type="range" min="1" max="8" step="1" value="4" />
-        </label>
+            <label id="static-body-control" class="checkbox-row">
+              <span>Static body</span>
+              <input id="static-body" type="checkbox" />
+            </label>
+          </div>
+        </details>
 
-        <label>
-          <span>Contact iterations <output id="contact-iterations-output">8</output></span>
-          <input id="contact-iterations" type="range" min="0" max="8" step="1" value="8" />
-        </label>
+        <details class="control-section" open>
+          <summary>Properties</summary>
+          <div class="section-body">
+            <p id="property-mode">Editing spawn properties</p>
 
-        <label>
-          <span>Bond iterations <output id="bond-iterations-output">8</output></span>
-          <input id="bond-iterations" type="range" min="1" max="8" step="1" value="8" />
-        </label>
+            <label>
+              <span>Elasticity <output id="soft-body-strength-output">2000</output></span>
+              <input id="soft-body-strength" type="range" min="0" max="6000" step="50" value="2000" />
+            </label>
 
-        <label>
-          <span>Elasticity <output id="soft-body-strength-output">2000</output></span>
-          <input id="soft-body-strength" type="range" min="0" max="6000" step="50" value="2000" />
-        </label>
+            <label>
+              <span>Viscosity <output id="viscosity-output">4.0</output></span>
+              <input id="viscosity" type="range" min="0" max="16" step="0.5" value="4" />
+            </label>
 
-        <label>
-          <span>Viscosity <output id="viscosity-output">4.0</output></span>
-          <input id="viscosity" type="range" min="0" max="16" step="0.5" value="4" />
-        </label>
+            <label>
+              <span>Friction <output id="friction-output">0.18</output></span>
+              <input id="friction" type="range" min="0" max="1" step="0.01" value="0.18" />
+            </label>
 
-        <label>
-          <span>Friction <output id="friction-output">0.18</output></span>
-          <input id="friction" type="range" min="0" max="1" step="0.01" value="0.18" />
-        </label>
+            <label id="motor-strength-control" hidden>
+              <span>Motor strength <output id="motor-strength-output">500</output></span>
+              <input id="motor-strength" type="range" min="0" max="500" step="1" value="500" />
+            </label>
+          </div>
+        </details>
 
-        <label class="checkbox-row">
-          <span>Static body</span>
-          <input id="static-body" type="checkbox" />
-        </label>
+        <details class="control-section">
+          <summary>Simulation</summary>
+          <div class="section-body">
+            <label>
+              <span>Gravity <output id="gravity-output">280</output></span>
+              <input id="gravity" type="range" min="-600" max="1000" step="10" value="280" />
+            </label>
 
-        <label id="motor-strength-control" hidden>
-          <span>Motor strength <output id="motor-strength-output">500</output></span>
-          <input id="motor-strength" type="range" min="0" max="500" step="1" value="500" />
-        </label>
+            <label>
+              <span>Damping <output id="damping-output">0.25</output></span>
+              <input id="damping" type="range" min="0" max="2" step="0.01" value="0.25" />
+            </label>
 
-        <label>
-          <span>Wall bounce <output id="wall-bounce-output">0</output></span>
-          <input id="wall-bounce" type="range" min="0" max="0.9" step="0.01" value="0" />
-        </label>
+            <label>
+              <span>Substeps <output id="substeps-output">4</output></span>
+              <input id="substeps" type="range" min="1" max="8" step="1" value="4" />
+            </label>
 
-        <label>
-          <span>Drag strength <output id="mouse-force-output">5000</output></span>
-          <input id="mouse-force" type="range" min="0" max="180000" step="5000" value="5000" />
-        </label>
+            <label>
+              <span>Contact iterations <output id="contact-iterations-output">8</output></span>
+              <input id="contact-iterations" type="range" min="0" max="8" step="1" value="8" />
+            </label>
+
+            <label>
+              <span>Bond iterations <output id="bond-iterations-output">8</output></span>
+              <input id="bond-iterations" type="range" min="1" max="8" step="1" value="8" />
+            </label>
+
+            <label>
+              <span>Wall bounce <output id="wall-bounce-output">0</output></span>
+              <input id="wall-bounce" type="range" min="0" max="0.9" step="0.01" value="0" />
+            </label>
+          </div>
+        </details>
+
+        <details class="control-section">
+          <summary>Interaction</summary>
+          <div class="section-body">
+            <label>
+              <span>Render</span>
+              <select id="render-mode">
+                <option value="particles">Particles</option>
+                <option value="vectors">Vectors</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Drag strength <output id="mouse-force-output">5000</output></span>
+              <input id="mouse-force" type="range" min="0" max="180000" step="5000" value="5000" />
+            </label>
+          </div>
+        </details>
       </section>
     </main>
     <script type="module" src="/src/main.ts"></script>

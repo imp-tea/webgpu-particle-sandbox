@@ -9,6 +9,7 @@ Use `npm.cmd run build` on Windows PowerShell to type-check and build. Use `npm.
 ## Important Files
 
 - `src/main.ts`: app bootstrap, UI binding, startup scene, render loop, simulation pass orchestration, CPU-side body/joint/motor setup.
+- `src/input.ts`: pointer input and modifier-click routing for body placement, deletion, dynamic joints, and normal dragging.
 - `src/config.ts`: shared constants, byte sizes, limits, and default simulation settings.
 - `src/gpu/buffers.ts`: GPU buffer allocation and CPU-side particle/body/bond/rest-shape/joint data creation.
 - `src/gpu/pipelines.ts`: WebGPU pipeline, bind group layout, and bind group creation.
@@ -33,6 +34,8 @@ Per frame:
    - `solveContacts`: project overlapping particles unless their bodies are directly jointed.
 4. Render from the active particle buffer.
 
+CPU particle snapshots are used for picking, vector rendering, drag previews, Ctrl/Meta placement, Ctrl/Meta right-click deletion, and Shift-click joint creation. Keep new interaction features tolerant of snapshot latency; do not add per-frame GPU readbacks beyond the existing throttled snapshot/picking paths.
+
 ## Recent Rigidbody-Style Additions
 
 - The startup scene now loads a simple car: a rectangular chassis plus two circular wheel bodies.
@@ -42,6 +45,30 @@ Per frame:
 - Joints are stored in a fixed-size joint buffer (`MAX_JOINTS`, `JOINT_STRIDE_BYTES`) and currently implement soft pin-style attachment between chassis and wheels.
 - Joint-connected bodies intentionally do not collide with each other in `solveContacts.wgsl`.
 - The default settings currently emphasize lower-energy behavior: substeps `4`, elasticity `2000`, wall bounce `0`, drag strength `5000`, radius `8`.
+
+## Body Kinds, Static Bodies, and Deletion
+
+- `Particle.flags` uses the low 16 bits for body id. Higher bits encode particle kind (`soft`, `static`, `rope`). Keep the body-id mask behavior intact for picking, contacts, rendering, and joints.
+- The body buffer is still `32` bytes. Offset `28` now stores body kind flags, replacing the old padding slot.
+- `mass = 0.0` means static / infinite mass. Simulation, contacts, and joints must use inverse-mass helpers instead of directly dividing by `mass`.
+- Static bodies are a spawn-time option. Existing body kind is not rewritten from the UI because that would require updating particle flags and masses in both ping-pong particle buffers.
+- Deletion is a soft delete: particle ranges, bonds, rest-shape data, and body metadata are zeroed, but particle/body buffers are not compacted and body ids are not reused. `settings.particleCount` remains a high-water mark while live UI stats are computed from `bodyRenderInfos`.
+
+## Rope / Chain Notes
+
+- The body selector includes a `Rope` option. Ropes can be created with the normal Add body button or by Ctrl/Meta-clicking the canvas once for the start and again for the end.
+- Rope controls include length multiplier, density, and pinned start/end endpoints. Pinned rope endpoints are represented as static particles with `mass = 0`.
+- Ropes use `ParticleBuffers.addRope`, not the soft-body shape sampler. They write normal particle/body/bond/rest-shape buffers and stay compatible with ping-pong particle buffers.
+- Rope bonds use adjacent stretch bonds plus weaker two-particle bend bonds within the existing `BOND_SLOT_COUNT = 8` layout.
+- Rope rest-shape weights are `0`, so shape memory does not try to preserve a rigid original silhouette. Keep body `softBodyStrength` nonzero if bond relaxation should run.
+- In `Vectors` render mode, ropes render as open polylines. Non-SVG soft/static bodies render as filled perimeter polygons, and SVG bodies use the bitmap warp path.
+
+## Canvas Interaction Notes
+
+- Ctrl/Meta + left click places the selected body. For ropes, the first click starts a pending rope and the second click sets the end. Escape cancels pending placement.
+- Ctrl/Meta + right click deletes the body nearest the latest CPU snapshot pick.
+- Shift + left click on two different bodies creates a soft pin joint between the picked particles. Joint anchors use CPU-side rest positions stored with each `BodyRenderInfo`.
+- The placement and joint preview bands are DOM overlays, not simulation geometry.
 
 ## SVG Body / Vector Rendering Notes
 
@@ -66,8 +93,8 @@ Recent drift mitigation work added low-cost solver symmetrization:
 ## Data Layout Cautions
 
 - Keep WGSL struct layouts and TypeScript byte sizes aligned. `SIM_PARAMS_BYTES` is currently `128` to satisfy uniform alignment after adding `solverPhase`.
-- The body buffer is still `32` bytes. Offsets `8` and `12` store motor target angular velocity and motor strength; offsets `16`, `20`, and `24` store soft-body strength, viscosity, and friction.
-- The particle buffer is still `32` bytes. Packed SVG colors are encoded in `materialId` with high bit `0x80000000`; do not change particle struct layouts without updating every WGSL `Particle` definition.
+- The body buffer is still `32` bytes. Offsets `8` and `12` store motor target angular velocity and motor strength; offsets `16`, `20`, and `24` store soft-body strength, viscosity, and friction; offset `28` stores body kind flags.
+- The particle buffer is still `32` bytes. Packed SVG colors are encoded in `materialId` with high bit `0x80000000`; particle kind is encoded in `flags` above the low body-id bits. Do not change particle struct layouts without updating every WGSL `Particle` definition.
 - Contact bind groups include the joint buffer at binding `7`; joint solve bind groups include it at binding `5`.
 - If adding fields to GPU structs, update all shaders that define the same struct shape, not only the shader that uses the new field.
 
